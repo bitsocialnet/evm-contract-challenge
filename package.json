@@ -56,8 +56,10 @@
     "vitest": "4.1.11"
   },
   "overrides": {
+    "@pkcprotocol/pkc-js": {
+      "@libp2p/gossipsub": "16.0.5"
+    },
     "@protobufjs/utf8@1.1.0": "1.1.1",
-    "fast-uri@3.1.5": "3.1.6",
     "protobufjs@6.11.4": "7.6.5",
     "undici@7.24.7": "7.29.0",
     "uuid@13.0.0": "13.0.1",
