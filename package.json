@@ -51,9 +51,9 @@
     "commitizen": "4.3.2",
     "cz-conventional-changelog": "3.3.0",
     "husky": "9.1.7",
-    "release-it": "21.0.2",
+    "release-it": "21.1.1",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   },
   "overrides": {
     "@pkcprotocol/pkc-js": {
@@ -61,7 +61,7 @@
     },
     "@protobufjs/utf8@1.1.0": "1.1.1",
     "protobufjs@6.11.4": "7.6.5",
-    "undici@7.24.7": "7.29.0",
+    "undici@7.24.7": "7.29.1",
     "uuid@13.0.0": "13.0.1",
     "ws@8.20.0": "8.21.0"
   },
