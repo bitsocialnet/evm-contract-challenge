@@ -57,9 +57,13 @@
   },
   "overrides": {
     "@pkcprotocol/pkc-js": {
-      "@libp2p/gossipsub": "16.0.5"
+      "@libp2p/gossipsub": "16.0.5",
+      "probe-image-size": "7.4.0"
     },
     "@protobufjs/utf8@1.1.0": "1.1.1",
+    "get-uri": {
+      "basic-ftp": "6.2.3"
+    },
     "protobufjs@6.11.4": "7.6.5",
     "undici@7.24.7": "7.29.1",
     "uuid@13.0.0": "13.0.1",
