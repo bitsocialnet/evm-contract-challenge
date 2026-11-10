@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { encodeAbiParameters, verifyMessage } from "viem";
+import { encodeAbiParameters, HttpRequestError, verifyMessage } from "viem";
 import { mainnet, polygon } from "viem/chains";
 import {
   generatePrivateKey,
@@ -692,6 +692,188 @@ describe("evmContractChallenge", () => {
     expect((result as { error?: string }).error).toContain(
       "ensAuthorAddressFailureReason='Failed to resolve ENS address of author.address: ENS provider is down'"
     );
+  });
+
+  it("falls through to the NFT check when the wallet address is a domain whose record matches", async () => {
+    // The domain check above passes, and the domain then reached verifyMessage, which throws
+    // InvalidAddressError for anything but a 0x address. The throw left getChallenge, so the ENS and
+    // NFT checks never ran and the author got an exception instead of a challenge result.
+    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const domainWallet = { ...wallet, address: "wallet-owner.eth" } as typeof wallet;
+    const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+    const result = await executeChallenge({
+      publication: createPublication({ wallet: domainWallet, avatar }),
+      mockClient: createClient({
+        verifyMessage,
+        readContract: async () => account.address,
+        call: async () => ({ data: HIGH_BALANCE_DATA })
+      }),
+      community: createCommunity({
+        resolveAuthorName: async () => ({ resolvedAuthorName: DEFAULT_AUTHOR_ADDRESS })
+      })
+    });
+
+    expect(result).toEqual({ success: true });
+  });
+
+  it("reports a domain wallet address as a wallet failure, not an exception", async () => {
+    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const domainWallet = { ...wallet, address: "wallet-owner.eth" } as typeof wallet;
+
+    const result = await executeChallenge({
+      publication: createPublication({ wallet: domainWallet }),
+      mockClient: createClient({
+        verifyMessage,
+        call: async () => ({ data: HIGH_BALANCE_DATA })
+      }),
+      community: createCommunity({
+        resolveAuthorName: async () => ({ resolvedAuthorName: DEFAULT_AUTHOR_ADDRESS })
+      })
+    });
+
+    expect(result.success).toBe(false);
+    expect((result as { error?: string }).error).toContain(
+      "walletFailureReason='The author wallet address is not a valid EVM address'"
+    );
+  });
+
+  it("falls through to the NFT check when the wallet signature check throws", async () => {
+    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+    const result = await executeChallenge({
+      publication: createPublication({ wallet, avatar }),
+      mockClient: createClient({
+        verifyMessage: async (args) => {
+          if (args.message.includes("plebbit-author-wallet")) {
+            throw new Error("verifier is down");
+          }
+          return verifyMessage(args);
+        },
+        readContract: async () => account.address,
+        call: async () => ({ data: HIGH_BALANCE_DATA })
+      })
+    });
+
+    expect(result).toEqual({ success: true });
+  });
+
+  it("falls through to the NFT check when resolving a domain wallet address throws", async () => {
+    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const domainWallet = { ...wallet, address: "wallet-owner.eth" } as typeof wallet;
+    const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+    const result = await executeChallenge({
+      publication: createPublication({ wallet: domainWallet, avatar }),
+      mockClient: createClient({
+        verifyMessage,
+        readContract: async () => account.address,
+        call: async () => ({ data: HIGH_BALANCE_DATA })
+      }),
+      community: createCommunity({
+        resolveAuthorName: async () => {
+          throw new Error("name resolver is down");
+        }
+      })
+    });
+
+    expect(result).toEqual({ success: true });
+  });
+
+  it("reports a throwing NFT signature check as a challenge failure, not an exception", async () => {
+    const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+    const result = await executeChallenge({
+      publication: createPublication({ avatar }),
+      mockClient: createClient({
+        verifyMessage: async () => {
+          throw new Error("verifier is down");
+        },
+        readContract: async () => account.address,
+        call: async () => ({ data: HIGH_BALANCE_DATA })
+      })
+    });
+
+    expect(result.success).toBe(false);
+    expect((result as { error?: string }).error).toContain(
+      "nftWalletAddressFailureReason='Failed to verify the nft avatar signature: verifier is down'"
+    );
+  });
+
+  // A viem error's message also carries transport details such as the request URL. Reasons built from
+  // one use its shortMessage instead.
+  describe("failure reasons from a viem error", () => {
+    const RPC_URL = "https://eth.example/v2/rpc-path";
+    const createRpcError = () =>
+      new HttpRequestError({
+        url: RPC_URL,
+        body: { method: "eth_getCode" },
+        details: "fetch failed"
+      });
+
+    it("uses the short message in the wallet signature reason", async () => {
+      const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet }),
+        mockClient: createClient({
+          verifyMessage: async () => {
+            throw createRpcError();
+          },
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        })
+      });
+
+      expect(result.success).toBe(false);
+      const error = (result as { error?: string }).error;
+      expect(error).toContain(
+        "walletFailureReason='Failed to verify the wallet signature: HTTP request failed.'"
+      );
+      expect(error).not.toContain(RPC_URL);
+    });
+
+    it("uses the short message in the nft avatar signature reason", async () => {
+      const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+
+      const result = await executeChallenge({
+        publication: createPublication({ avatar }),
+        mockClient: createClient({
+          verifyMessage: async () => {
+            throw createRpcError();
+          },
+          readContract: async () => account.address,
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        })
+      });
+
+      expect(result.success).toBe(false);
+      const error = (result as { error?: string }).error;
+      expect(error).toContain(
+        "nftWalletAddressFailureReason='Failed to verify the nft avatar signature: HTTP request failed.'"
+      );
+      expect(error).not.toContain(RPC_URL);
+    });
+
+    it("uses the short message in the ENS lookup reason", async () => {
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: "plebbit.eth" }),
+        mockClient: createClient({
+          verifyMessage,
+          getEnsAddress: async () => {
+            throw createRpcError();
+          },
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        })
+      });
+
+      expect(result.success).toBe(false);
+      const error = (result as { error?: string }).error;
+      expect(error).toContain(
+        "ensAuthorAddressFailureReason='Failed to resolve ENS address of author.address: HTTP request failed.'"
+      );
+      expect(error).not.toContain(RPC_URL);
+    });
   });
 
   it("reports an unresolvable ENS name as a challenge failure", async () => {

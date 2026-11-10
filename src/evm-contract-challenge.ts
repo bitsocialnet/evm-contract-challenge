@@ -291,6 +291,17 @@ const derivePublicationFromChallengeRequest = (
   throw new Error("Failed to find publication on ChallengeRequest");
 };
 
+// Failure reasons are shown to the author. A viem error's message also carries transport details such
+// as the request URL, so a viem error contributes only its shortMessage. Checked by shape rather than
+// instanceof BaseError so an error from any copy of viem is covered.
+const describeError = (e: unknown): string => {
+  if (!(e instanceof Error)) {
+    return String(e);
+  }
+  const { shortMessage } = e as Error & { shortMessage?: unknown };
+  return typeof shortMessage === "string" ? shortMessage : e.message;
+};
+
 const getPublicationSignerAddress = async (
   pkc: PKC,
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest
@@ -312,10 +323,18 @@ const verifyAuthorWalletAddress = async (
     return "The author wallet address is not defined";
   }
 
+  // Like the ENS lookup and the NFT read, the steps below run on author-supplied input and can throw.
+  // The wallet is one of three sources of a wallet address, so a throw here is returned as this
+  // source's reason and getChallenge goes on to the ENS and NFT checks.
   if (isStringDomain(authorWallet.address)) {
-    const { resolvedAuthorName } = await props.pkc.resolveAuthorName({
-      name: authorWallet.address
-    });
+    let resolvedAuthorName: string | null | undefined;
+    try {
+      ({ resolvedAuthorName } = await props.pkc.resolveAuthorName({
+        name: authorWallet.address
+      }));
+    } catch (e) {
+      return `Failed to resolve the author wallet address: ${describeError(e)}`;
+    }
     const publicationSignatureAddress = await getPublicationSignerAddress(
       props.pkc,
       props.publication
@@ -326,6 +345,13 @@ const verifyAuthorWalletAddress = async (
     }
   }
 
+  // A domain whose record matches still cannot be checked against a signature: verifyMessage throws
+  // InvalidAddressError for anything but a 0x address. Strict, like the encoder the contract call
+  // uses, so a wrongly checksummed address fails here rather than at that call.
+  if (!isAddress(authorWallet.address)) {
+    return "The author wallet address is not a valid EVM address";
+  }
+
   const viemClient = createViemClient(props.rpcUrls, props.chainTicker);
 
   const messageToBeSigned: Record<string, string | number> = {};
@@ -333,11 +359,16 @@ const verifyAuthorWalletAddress = async (
   messageToBeSigned.authorAddress = props.publication.author.address;
   messageToBeSigned.timestamp = authorWallet.timestamp;
 
-  const valid = await viemClient.verifyMessage({
-    address: authorWallet.address as HexAddress,
-    message: JSON.stringify(messageToBeSigned),
-    signature: authorWallet.signature.signature as HexAddress
-  });
+  let valid: boolean;
+  try {
+    valid = await viemClient.verifyMessage({
+      address: authorWallet.address,
+      message: JSON.stringify(messageToBeSigned),
+      signature: authorWallet.signature.signature as HexAddress
+    });
+  } catch (e) {
+    return `Failed to verify the wallet signature: ${describeError(e)}`;
+  }
 
   if (!valid) {
     return "The signature of the wallet is invalid";
@@ -402,7 +433,7 @@ const verifyAuthorENSAddress = async (
       name: normalize(ensAddress)
     });
   } catch (e) {
-    return `Failed to resolve ENS address of author.address: ${e instanceof Error ? e.message : String(e)}`;
+    return `Failed to resolve ENS address of author.address: ${describeError(e)}`;
   }
 
   if (!ownerOfAddress) {
@@ -456,11 +487,16 @@ const verifyAuthorNftWalletAddress = async (
   messageToBeSigned.tokenAddress = nftAvatar.address;
   messageToBeSigned.tokenId = String(nftAvatar.id);
 
-  const valid = await viemClient.verifyMessage({
-    address: currentOwner,
-    message: JSON.stringify(messageToBeSigned),
-    signature: nftAvatar.signature.signature as HexAddress
-  });
+  let valid: boolean;
+  try {
+    valid = await viemClient.verifyMessage({
+      address: currentOwner,
+      message: JSON.stringify(messageToBeSigned),
+      signature: nftAvatar.signature.signature as HexAddress
+    });
+  } catch (e) {
+    return `Failed to verify the nft avatar signature: ${describeError(e)}`;
+  }
 
   if (!valid) {
     return "The signature of the nft avatar is invalid";
