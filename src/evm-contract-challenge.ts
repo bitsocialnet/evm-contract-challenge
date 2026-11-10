@@ -164,21 +164,20 @@ const parseRpcUrls = (rpcUrls: string | undefined): string[] =>
     .map((u) => u.trim())
     .filter(Boolean);
 
+// No `rank: true` on the fallback: ranking starts a loop that pings every endpoint every few seconds
+// and viem has no way to stop it. Cached clients are never evicted (a challenge file has no teardown
+// hook), so a ranked client kept polling its endpoints for the life of the node, including those of
+// an rpcUrls value the owner had since replaced. Unranked, endpoints are tried in the listed order
+// and a client sends nothing until it is used.
 const createTransport = (urls: string[]): Transport =>
   urls.length === 0
     ? http()
     : urls.length === 1
       ? http(urls[0])
-      : fallback(
-          urls.map((u) => http(u)),
-          { rank: true }
-        );
+      : fallback(urls.map((u) => http(u)));
 
-// Clients are cached per (chainTicker, rpcUrls) rather than built per call. fallback(..., {rank: true})
-// starts a background interval that pings every endpoint to reorder them and is never torn down, and a
-// single challenge attempt builds a client for the wallet check, the ENS check, the NFT check and each
-// contract call. Without this cache every publish would leak several permanent timers, each polling the
-// owner's RPC endpoints for the life of the node.
+// Clients are cached per (chainTicker, rpcUrls) rather than built per call: a single challenge attempt
+// builds a client for the wallet check, the ENS check, the NFT check and each contract call.
 const viemClientCache = new Map<string, PublicClient>();
 
 // Test seam: the cache is keyed by config, so nothing invalidates it within a process. Tests that swap
