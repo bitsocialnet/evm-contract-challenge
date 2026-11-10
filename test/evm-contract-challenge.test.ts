@@ -116,8 +116,9 @@ const createCommunity = (params: {
   resolveAuthorName?: (args: {
     name: string;
   }) => Promise<{ resolvedAuthorName: string | null }>;
+  storage?: Map<string, unknown>;
 } = {}) => {
-  const storage = new Map<string, unknown>();
+  const storage = params.storage ?? new Map<string, unknown>();
 
   const pkc = {
     resolveAuthorName:
@@ -141,6 +142,8 @@ const createPublication = (params: {
   // The wallet is looked up as author.wallets[chainTicker], so a test using a non-default chainTicker
   // has to register the wallet under that ticker or the wallet check returns early.
   walletChainTicker?: string;
+  // The key that signed the publication. Two different authors have two different keys.
+  signerPublicKey?: string;
 }): PublicationWithCommunityAuthorFromDecryptedChallengeRequest => {
   const authorAddress = params.authorAddress ?? DEFAULT_AUTHOR_ADDRESS;
 
@@ -152,7 +155,12 @@ const createPublication = (params: {
         : {}),
       ...(params.avatar ? { avatar: params.avatar } : {})
     },
-    signature: { type: "ed25519", signature: "", publicKey: "mock-public-key", signedPropertyNames: [] }
+    signature: {
+      type: "ed25519",
+      signature: "",
+      publicKey: params.signerPublicKey ?? "mock-public-key",
+      signedPropertyNames: []
+    }
   } as unknown as PublicationWithCommunityAuthorFromDecryptedChallengeRequest;
 };
 
@@ -182,8 +190,9 @@ const createAvatarMessage = (params: {
 const signWalletProof = async (params: {
   authorAddress: string;
   corrupted?: boolean;
+  timestamp?: number;
 }): Promise<AuthorWallet> => {
-  const timestamp = Math.round(Date.now() / 1000);
+  const timestamp = params.timestamp ?? Math.round(Date.now() / 1000);
   const message = createWalletMessage(params.authorAddress, timestamp);
   const signedMessage = params.corrupted ? `${message}1` : message;
 
@@ -910,6 +919,202 @@ describe("evmContractChallenge", () => {
         }
       })
     ).rejects.toThrow(/option rpcUrls is required for chainTicker "notachain"/);
+  });
+
+  // A wallet signed over to a new author with a newer timestamp stops working for the previous one.
+  // These cover the ways a second author used to keep sharing the wallet anyway.
+  describe("wallet signature replay guard", () => {
+    const TIMESTAMP = 1_700_000_000;
+
+    // An author is the key that signs their publications. author.address is that key's address, or
+    // the author's name when they have one.
+    interface Author {
+      address: string;
+      signerPublicKey: string;
+    }
+
+    const AUTHOR_1: Author = { address: "author-1", signerPublicKey: "author-1-public-key" };
+    const AUTHOR_2: Author = { address: "author-2", signerPublicKey: "author-2-public-key" };
+
+    const runWithWallet = (params: {
+      author: Author;
+      wallet: AuthorWallet;
+      community: ReturnType<typeof createCommunity>;
+      chainTicker?: string;
+    }) =>
+      executeChallenge({
+        publication: createPublication({
+          authorAddress: params.author.address,
+          signerPublicKey: params.author.signerPublicKey,
+          wallet: params.wallet,
+          ...(params.chainTicker ? { walletChainTicker: params.chainTicker } : {})
+        }),
+        settings: createChallengeSettings(
+          params.chainTicker ? { chainTicker: params.chainTicker } : {}
+        ),
+        mockClient: createClient({
+          verifyMessage,
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        }),
+        community: params.community
+      });
+
+    it("rejects the previous author once the wallet is signed for another with a newer timestamp", async () => {
+      const community = createCommunity();
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const newWallet = await signWalletProof({ authorAddress: AUTHOR_2.address, timestamp: TIMESTAMP + 1 });
+
+      expect(await runWithWallet({ author: AUTHOR_1, wallet: oldWallet, community })).toEqual({ success: true });
+      expect(await runWithWallet({ author: AUTHOR_2, wallet: newWallet, community })).toEqual({ success: true });
+
+      const replay = await runWithWallet({ author: AUTHOR_1, wallet: oldWallet, community });
+      expect(replay.success).toBe(false);
+      expect((replay as { error?: string }).error).toContain(
+        "walletFailureReason='The author is trying to use an old wallet signature'"
+      );
+    });
+
+    it("does not let a second author share the wallet by signing with the same timestamp", async () => {
+      // The guard only rejected a strictly older timestamp, so two authors signed with the same one
+      // both passed for as long as the wallet signed nothing newer.
+      const community = createCommunity();
+      const firstWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const secondWallet = await signWalletProof({ authorAddress: AUTHOR_2.address, timestamp: TIMESTAMP });
+
+      expect(await runWithWallet({ author: AUTHOR_1, wallet: firstWallet, community })).toEqual({ success: true });
+
+      const second = await runWithWallet({ author: AUTHOR_2, wallet: secondWallet, community });
+      expect(second.success).toBe(false);
+      expect((second as { error?: string }).error).toContain(
+        "walletFailureReason='Another author already uses this wallet with a signature of the same timestamp'"
+      );
+
+      // The author holding the wallet keeps reusing the same signature, as every publication does.
+      expect(await runWithWallet({ author: AUTHOR_1, wallet: firstWallet, community })).toEqual({ success: true });
+    });
+
+    it("keeps passing the same signer after its author address changes to a name", async () => {
+      // Clients re-sign a wallet with the timestamp they stored for it. An author who sets a name
+      // gets a new author.address, so the re-signed wallet has the same timestamp and a different
+      // author address, but it is still the same signer and the same person.
+      const community = createCommunity();
+      const signerPublicKey = "alice-public-key";
+      const keyAddress = "12D3KooWAliceKeyAddress";
+      const keyWallet = await signWalletProof({ authorAddress: keyAddress, timestamp: TIMESTAMP });
+      const nameWallet = await signWalletProof({ authorAddress: "alice.bso", timestamp: TIMESTAMP });
+
+      expect(
+        await runWithWallet({ author: { address: keyAddress, signerPublicKey }, wallet: keyWallet, community })
+      ).toEqual({ success: true });
+      expect(
+        await runWithWallet({ author: { address: "alice.bso", signerPublicKey }, wallet: nameWallet, community })
+      ).toEqual({ success: true });
+      // And back again, if the author clears the name.
+      expect(
+        await runWithWallet({ author: { address: keyAddress, signerPublicKey }, wallet: keyWallet, community })
+      ).toEqual({ success: true });
+    });
+
+    it("treats another spelling of the wallet address as the same wallet", async () => {
+      // The record was keyed by the address exactly as typed, so the lowercase spelling of a
+      // checksummed address had a record of its own and an older signature passed through it.
+      const community = createCommunity();
+      const newWallet = await signWalletProof({ authorAddress: AUTHOR_2.address, timestamp: TIMESTAMP + 1 });
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const lowercasedOldWallet = { ...oldWallet, address: oldWallet.address.toLowerCase() };
+
+      expect(lowercasedOldWallet.address).not.toBe(oldWallet.address);
+      expect(await runWithWallet({ author: AUTHOR_2, wallet: newWallet, community })).toEqual({ success: true });
+
+      const replay = await runWithWallet({ author: AUTHOR_1, wallet: lowercasedOldWallet, community });
+      expect(replay.success).toBe(false);
+      expect((replay as { error?: string }).error).toContain(
+        "walletFailureReason='The author is trying to use an old wallet signature'"
+      );
+    });
+
+    it("still honours a record stored as a bare timestamp by earlier versions", async () => {
+      // Earlier versions stored the timestamp alone, under the chainTicker plus the address as the
+      // author sent it, which is the checksummed spelling clients send. Until the holder publishes
+      // again, that row is all that stops the previous author after an upgrade.
+      const storage = new Map<string, unknown>([[`eth${account.address}`, TIMESTAMP + 1]]);
+      const community = createCommunity({ storage });
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const holderWallet = await signWalletProof({ authorAddress: AUTHOR_2.address, timestamp: TIMESTAMP + 1 });
+
+      expect(account.address).not.toBe(account.address.toLowerCase());
+      const replay = await runWithWallet({ author: AUTHOR_1, wallet: oldWallet, community });
+      expect(replay.success).toBe(false);
+      expect((replay as { error?: string }).error).toContain(
+        "walletFailureReason='The author is trying to use an old wallet signature'"
+      );
+
+      // The old row names no signer, so the holder's signature with the same timestamp still passes,
+      // and from then on the new record keeps the previous author out.
+      expect(await runWithWallet({ author: AUTHOR_2, wallet: holderWallet, community })).toEqual({ success: true });
+      expect((await runWithWallet({ author: AUTHOR_1, wallet: oldWallet, community })).success).toBe(false);
+    });
+
+    it("finds a record stored by earlier versions under the other spelling of the address", async () => {
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const lowercasedOldWallet = { ...oldWallet, address: oldWallet.address.toLowerCase() };
+      const cases: Array<{ storedUnder: string; wallet: AuthorWallet }> = [
+        { storedUnder: `eth${account.address}`, wallet: lowercasedOldWallet },
+        { storedUnder: `eth${account.address.toLowerCase()}`, wallet: oldWallet }
+      ];
+
+      for (const { storedUnder, wallet } of cases) {
+        const community = createCommunity({
+          storage: new Map<string, unknown>([[storedUnder, TIMESTAMP + 1]])
+        });
+
+        const replay = await runWithWallet({ author: AUTHOR_1, wallet, community });
+        expect(replay.success, `record under ${storedUnder}, wallet sent as ${wallet.address}`).toBe(false);
+        expect((replay as { error?: string }).error).toContain(
+          "walletFailureReason='The author is trying to use an old wallet signature'"
+        );
+      }
+    });
+
+    it("does not let an older bare timestamp under the new key hide a newer record of earlier versions", async () => {
+      // With the usual "eth" chainTicker, an earlier version's lowercase row sits at the new key. It
+      // names no signer, so the other spelling's row still counts, and here it holds the newer timestamp.
+      const storage = new Map<string, unknown>([
+        [`eth${account.address.toLowerCase()}`, TIMESTAMP],
+        [`eth${account.address}`, TIMESTAMP + 1]
+      ]);
+      const community = createCommunity({ storage });
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+
+      const replay = await runWithWallet({ author: AUTHOR_1, wallet: oldWallet, community });
+      expect(replay.success).toBe(false);
+      expect((replay as { error?: string }).error).toContain(
+        "walletFailureReason='The author is trying to use an old wallet signature'"
+      );
+    });
+
+    it("finds a record stored by earlier versions under the chainTicker as configured", async () => {
+      // Earlier versions did not normalize the chainTicker, so with "ETH" configured their rows start
+      // with "ETH" while the new key starts with "eth".
+      const oldWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const lowercasedOldWallet = { ...oldWallet, address: oldWallet.address.toLowerCase() };
+      const cases: Array<{ storedUnder: string; wallet: AuthorWallet }> = [
+        { storedUnder: `ETH${account.address.toLowerCase()}`, wallet: oldWallet },
+        { storedUnder: `ETH${account.address}`, wallet: lowercasedOldWallet }
+      ];
+
+      for (const { storedUnder, wallet } of cases) {
+        const community = createCommunity({
+          storage: new Map<string, unknown>([[storedUnder, TIMESTAMP + 1]])
+        });
+
+        const replay = await runWithWallet({ author: AUTHOR_1, wallet, community, chainTicker: "ETH" });
+        expect(replay.success, `record under ${storedUnder}, wallet sent as ${wallet.address}`).toBe(false);
+        expect((replay as { error?: string }).error).toContain(
+          "walletFailureReason='The author is trying to use an old wallet signature'"
+        );
+      }
+    });
   });
 
   // docs/nft.md is the guide a client follows to build an avatar payload, and nothing executed it, so

@@ -3,6 +3,7 @@ import {
   decodeFunctionResult,
   encodeFunctionData,
   fallback,
+  getAddress,
   http,
   isAddress,
   type AbiFunction,
@@ -314,6 +315,63 @@ const getPublicationSignerAddress = async (
   return publication.author.address;
 };
 
+interface LastWalletSignature {
+  timestamp: number;
+  signerPublicKey?: string;
+}
+
+// Versions before the signer was recorded stored a bare timestamp, read here as a record whose
+// signer is unknown.
+const parseLastWalletSignature = (
+  value: unknown
+): LastWalletSignature | undefined => {
+  if (typeof value === "number") {
+    return { timestamp: value };
+  }
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const { timestamp, signerPublicKey } = value as Record<string, unknown>;
+  if (typeof timestamp !== "number") {
+    return undefined;
+  }
+  return typeof signerPublicKey === "string"
+    ? { timestamp, signerPublicKey }
+    : { timestamp };
+};
+
+// Those versions also keyed the record by the chainTicker as configured plus the address as the author
+// sent it, lowercase or checksummed. One of those rows can sit at the new key itself, so until the
+// wallet has a record that names its signer, the newest of all of them decides. Otherwise an upgrade
+// would let a superseded author's old signature pass again.
+const readLastWalletSignature = async (
+  cache: Awaited<ReturnType<PKC["_createStorageLRU"]>>,
+  cacheKey: string,
+  chainTicker: string,
+  walletAddress: string
+): Promise<LastWalletSignature | undefined> => {
+  const current = parseLastWalletSignature(await cache.getItem(cacheKey));
+  if (current?.signerPublicKey !== undefined) {
+    return current;
+  }
+
+  const legacyKeys = new Set([
+    chainTicker + walletAddress.toLowerCase(),
+    chainTicker + getAddress(walletAddress)
+  ]);
+  legacyKeys.delete(cacheKey);
+
+  let newest = current;
+  for (const legacyKey of legacyKeys) {
+    const signature = parseLastWalletSignature(await cache.getItem(legacyKey));
+    if (signature && (!newest || signature.timestamp > newest.timestamp)) {
+      newest = signature;
+    }
+  }
+  return newest;
+};
+
 const verifyAuthorWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
@@ -378,20 +436,41 @@ const verifyAuthorWalletAddress = async (
     maxItems: Number.MAX_SAFE_INTEGER
   });
 
-  const cacheKey = props.chainTicker + authorWallet.address;
-  const lastTimestampRaw = await cache.getItem(cacheKey);
-  const lastTimestampOfAuthor =
-    typeof lastTimestampRaw === "number" ? lastTimestampRaw : undefined;
+  // One record per wallet: the newest signature timestamp seen and the key that signed the publication
+  // it came with. A wallet signed over to a new author with a newer timestamp stops working for the
+  // previous one, so the record has to say who holds that timestamp, or a second author signed with the
+  // same timestamp passes too. The author is identified by the signer key pkc-js has already verified,
+  // not by author.address: that is the author's name when they have one, so it changes when they set or
+  // clear the name, and clients re-sign the wallet with the timestamp they stored for it. The address
+  // is lowercased so another spelling of the same wallet shares the record.
+  const cacheKey =
+    normalizeChainTicker(props.chainTicker) + authorWallet.address.toLowerCase();
+  const lastSignature = await readLastWalletSignature(
+    cache,
+    cacheKey,
+    props.chainTicker,
+    authorWallet.address
+  );
+  const signerPublicKey = props.publication.signature.publicKey;
 
-  if (
-    typeof lastTimestampOfAuthor === "number" &&
-    lastTimestampOfAuthor > authorWallet.timestamp
-  ) {
+  if (lastSignature && lastSignature.timestamp > authorWallet.timestamp) {
     return "The author is trying to use an old wallet signature";
   }
 
-  if ((lastTimestampOfAuthor ?? 0) < authorWallet.timestamp) {
-    await cache.setItem(cacheKey, authorWallet.timestamp);
+  const sameTimestamp = lastSignature?.timestamp === authorWallet.timestamp;
+  if (
+    sameTimestamp &&
+    lastSignature.signerPublicKey !== undefined &&
+    lastSignature.signerPublicKey !== signerPublicKey
+  ) {
+    return "Another author already uses this wallet with a signature of the same timestamp";
+  }
+
+  if (!sameTimestamp || lastSignature.signerPublicKey !== signerPublicKey) {
+    await cache.setItem(cacheKey, {
+      timestamp: authorWallet.timestamp,
+      signerPublicKey
+    });
   }
 
   const walletValidationFailure = await validateWalletAddressWithCondition({
