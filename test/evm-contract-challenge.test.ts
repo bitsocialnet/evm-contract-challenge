@@ -993,6 +993,82 @@ describe("evmContractChallenge", () => {
       expect(await runWithWallet({ author: AUTHOR_1, wallet: firstWallet, community })).toEqual({ success: true });
     });
 
+    it("lets only one of two authors through when they send the same timestamp at the same time", async () => {
+      // Challenges run concurrently. Both used to read the empty record before either wrote theirs,
+      // so both passed, and the second write only decided who was rejected afterwards.
+      const community = createCommunity();
+      const firstWallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+      const secondWallet = await signWalletProof({ authorAddress: AUTHOR_2.address, timestamp: TIMESTAMP });
+
+      const results = await Promise.all([
+        runWithWallet({ author: AUTHOR_1, wallet: firstWallet, community }),
+        runWithWallet({ author: AUTHOR_2, wallet: secondWallet, community })
+      ]);
+
+      const passed = results.filter((result) => result.success);
+      const rejected = results.filter((result) => !result.success);
+      expect(passed).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as { error?: string }).error).toContain(
+        "walletFailureReason='Another author already uses this wallet with a signature of the same timestamp'"
+      );
+
+      // Whoever got the record keeps it.
+      const winnerIndex = results.findIndex((result) => result.success);
+      const winner = winnerIndex === 0
+        ? { author: AUTHOR_1, wallet: firstWallet }
+        : { author: AUTHOR_2, wallet: secondWallet };
+      expect(await runWithWallet({ ...winner, community })).toEqual({ success: true });
+    });
+
+    // A community whose storage throws on the first read and works afterwards.
+    const createCommunityFailingFirstRead = () => {
+      const storage = new Map<string, unknown>();
+      let failNextRead = true;
+      const community = createCommunity({ storage });
+      community._pkc._createStorageLRU = async () => ({
+        getItem: async (key: string) => {
+          if (failNextRead) {
+            failNextRead = false;
+            throw new Error("storage unavailable");
+          }
+          return storage.get(key);
+        },
+        setItem: async (key: string, value: unknown) => {
+          storage.set(key, value);
+        }
+      });
+      return community;
+    };
+
+    it("checks the wallet again after a check of it failed with a storage error", async () => {
+      // Checks of one wallet wait for each other, so a check that throws must not hold up the next.
+      const community = createCommunityFailingFirstRead();
+      const wallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+
+      await expect(runWithWallet({ author: AUTHOR_1, wallet, community })).rejects.toThrow("storage unavailable");
+      expect(await runWithWallet({ author: AUTHOR_1, wallet, community })).toEqual({ success: true });
+    });
+
+    it("runs a check waiting behind one that fails with a storage error", async () => {
+      // The second check starts while the first still holds the wallet, so it waits for it. The first
+      // check's error must stay with the first check.
+      const community = createCommunityFailingFirstRead();
+      const wallet = await signWalletProof({ authorAddress: AUTHOR_1.address, timestamp: TIMESTAMP });
+
+      const results = await Promise.allSettled([
+        runWithWallet({ author: AUTHOR_1, wallet, community }),
+        runWithWallet({ author: AUTHOR_1, wallet, community })
+      ]);
+
+      const rejected = results.filter((result) => result.status === "rejected");
+      const fulfilled = results.filter((result) => result.status === "fulfilled");
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ message: "storage unavailable" });
+      expect(fulfilled).toHaveLength(1);
+      expect((fulfilled[0] as PromiseFulfilledResult<unknown>).value).toEqual({ success: true });
+    });
+
     it("keeps passing the same signer after its author address changes to a name", async () => {
       // Clients re-sign a wallet with the timestamp they stored for it. An author who sets a name
       // gets a new author.address, so the re-signed wallet has the same timestamp and a different

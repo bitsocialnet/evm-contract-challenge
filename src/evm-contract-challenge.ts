@@ -372,6 +372,28 @@ const readLastWalletSignature = async (
   return newest;
 };
 
+// pkc-js runs challenges concurrently, and checking a wallet's record and writing it back takes several
+// awaits. Two publications from different signers with the same wallet timestamp could both read the
+// record before either wrote theirs, and both pass. Checks of one wallet therefore run one at a time.
+const walletRecordQueues = new Map<string, Promise<unknown>>();
+
+const runWithWalletRecord = async <T>(
+  cacheKey: string,
+  task: () => Promise<T>
+): Promise<T> => {
+  const previous = walletRecordQueues.get(cacheKey) ?? Promise.resolve();
+  const current = previous.then(task);
+  const settled = current.catch(() => undefined);
+  walletRecordQueues.set(cacheKey, settled);
+  try {
+    return await current;
+  } finally {
+    if (walletRecordQueues.get(cacheKey) === settled) {
+      walletRecordQueues.delete(cacheKey);
+    }
+  }
+};
+
 const verifyAuthorWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
@@ -445,32 +467,39 @@ const verifyAuthorWalletAddress = async (
   // is lowercased so another spelling of the same wallet shares the record.
   const cacheKey =
     normalizeChainTicker(props.chainTicker) + authorWallet.address.toLowerCase();
-  const lastSignature = await readLastWalletSignature(
-    cache,
-    cacheKey,
-    props.chainTicker,
-    authorWallet.address
-  );
   const signerPublicKey = props.publication.signature.publicKey;
 
-  if (lastSignature && lastSignature.timestamp > authorWallet.timestamp) {
-    return "The author is trying to use an old wallet signature";
-  }
+  const replayFailure = await runWithWalletRecord(cacheKey, async () => {
+    const lastSignature = await readLastWalletSignature(
+      cache,
+      cacheKey,
+      props.chainTicker,
+      authorWallet.address
+    );
 
-  const sameTimestamp = lastSignature?.timestamp === authorWallet.timestamp;
-  if (
-    sameTimestamp &&
-    lastSignature.signerPublicKey !== undefined &&
-    lastSignature.signerPublicKey !== signerPublicKey
-  ) {
-    return "Another author already uses this wallet with a signature of the same timestamp";
-  }
+    if (lastSignature && lastSignature.timestamp > authorWallet.timestamp) {
+      return "The author is trying to use an old wallet signature";
+    }
 
-  if (!sameTimestamp || lastSignature.signerPublicKey !== signerPublicKey) {
-    await cache.setItem(cacheKey, {
-      timestamp: authorWallet.timestamp,
-      signerPublicKey
-    });
+    const sameTimestamp = lastSignature?.timestamp === authorWallet.timestamp;
+    if (
+      sameTimestamp &&
+      lastSignature.signerPublicKey !== undefined &&
+      lastSignature.signerPublicKey !== signerPublicKey
+    ) {
+      return "Another author already uses this wallet with a signature of the same timestamp";
+    }
+
+    if (!sameTimestamp || lastSignature.signerPublicKey !== signerPublicKey) {
+      await cache.setItem(cacheKey, {
+        timestamp: authorWallet.timestamp,
+        signerPublicKey
+      });
+    }
+    return undefined;
+  });
+  if (replayFailure) {
+    return replayFailure;
   }
 
   const walletValidationFailure = await validateWalletAddressWithCondition({
