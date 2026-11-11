@@ -222,11 +222,11 @@ You can provide multiple RPC endpoints as a comma-separated string:
 https://eth.llamarpc.com,https://rpc.ankr.com/eth,https://eth.drpc.org
 ```
 
-When multiple URLs are provided, viem's [`fallback`](https://viem.sh/docs/clients/transports/fallback) transport is used with automatic ranking enabled (`rank: true`). This means:
+When multiple URLs are provided, viem's [`fallback`](https://viem.sh/docs/clients/transports/fallback) transport is used. This means:
 
-- Requests are sent to the highest-ranked RPC endpoint
-- If a request fails, it automatically falls back to the next endpoint
-- viem periodically pings all endpoints in the background and reorders them by latency and stability
+- Requests are sent to the first RPC endpoint in the list
+- If a request fails, it automatically falls back to the next endpoint, in the order listed
+- No background traffic: endpoints are only contacted when an author publishes. Automatic ranking (`rank: true`) is deliberately off, because its background pinging can never be stopped and would keep polling endpoints you have since removed from `rpcUrls` until the node restarts
 - A single URL works the same as before (no fallback overhead)
 - If `rpcUrls` is omitted, the chain's built-in RPC is used, which requires a supported `chainTicker` (see [When `rpcUrls` is required](#when-rpcurls-is-required))
 
