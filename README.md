@@ -8,7 +8,7 @@ When an author publishes to a community with this challenge enabled, the communi
 
 1. **Wallet address** — the `author.wallets[chainTicker]` address, verified with a [BSIP-22](https://github.com/bitsocialnet/BSIPs/blob/master/BSIPS/bsip-22.md) wallet proof (see [Wallet proofs](#wallet-proofs))
 2. **ENS/BSO domain** — if the author's address is a `.eth` or `.bso` domain, it resolves to an on-chain address
-3. **NFT avatar** — currently **disabled**. The avatar proof is signed over `author.address` with a legacy `plebbit-` separator, and there is no BSIP for avatar proofs yet (BSIP-22 covers wallets only). The code stays in the repository and will be re-enabled once a BSIP defines the proof.
+3. **NFT avatar** — currently **disabled**. The avatar proof is signed over `author.address` with a legacy `plebbit-` separator, and there is no BSIP for avatar proofs yet (BSIP-22 covers wallets only). The code stays in the repository and will be re-enabled once a BSIP defines the proof ([BSIP discussion](https://github.com/bitsocialnet/BSIPs/issues/40), [tracking issue](https://github.com/bitsocialnet/evm-contract-challenge/issues/11)).
 
 If any source produces a wallet that passes the contract call condition, the challenge succeeds. No user interaction is required.
 
@@ -29,7 +29,7 @@ Verification is stateless and needs no RPC: there is no "newest timestamp wins" 
 
 Proofs signed with the old `plebbit-author-wallet` or `pkc-author-wallet` separators, over `author.address`, or without `walletAddress` are not accepted. Authors re-sign.
 
-One wallet can still back several author keys. Whether to limit that is a separate question for this challenge, not a part of wallet-proof validity.
+One wallet can still back several author keys. Whether to limit that is a separate question for this challenge, not a part of wallet-proof validity ([#12](https://github.com/bitsocialnet/evm-contract-challenge/issues/12)).
 
 ## Requirements
 

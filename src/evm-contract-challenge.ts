@@ -790,6 +790,7 @@ const getChallenge = async ({
   // only). The legacy avatar message is signed over author.address with a plebbit- separator, which
   // has the same problems BSIP-22 fixed for wallets. verifyAuthorNftWalletAddress is kept, unreachable,
   // so that re-enabling it is a small change.
+  // Tracking: https://github.com/bitsocialnet/evm-contract-challenge/issues/11
   const nftWalletAddressFailureReason = NFT_AVATAR_DISABLED_REASON;
 
   const errorString =
