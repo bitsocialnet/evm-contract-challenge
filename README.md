@@ -6,11 +6,30 @@ An automatic challenge for `@pkcprotocol/pkc-js` communities that verifies an au
 
 When an author publishes to a community with this challenge enabled, the community node calls a read-only smart contract method with the author's wallet address as the argument and compares the return value against a configured condition (e.g. `>1000`). The challenge tries three sources for the wallet address:
 
-1. **Wallet address** — the `author.wallets[chainTicker]` address, verified via EIP-191 signature
+1. **Wallet address** — the `author.wallets[chainTicker]` address, verified with a [BSIP-22](https://github.com/bitsocialnet/BSIPs/blob/master/BSIPS/bsip-22.md) wallet proof (see [Wallet proofs](#wallet-proofs))
 2. **ENS/BSO domain** — if the author's address is a `.eth` or `.bso` domain, it resolves to an on-chain address
-3. **NFT avatar** — the current owner of the author's avatar NFT
+3. **NFT avatar** — currently **disabled**. The avatar proof is signed over `author.address` with a legacy `plebbit-` separator, and there is no BSIP for avatar proofs yet (BSIP-22 covers wallets only). The code stays in the repository and will be re-enabled once a BSIP defines the proof.
 
 If any source produces a wallet that passes the contract call condition, the challenge succeeds. No user interaction is required.
+
+## Wallet proofs
+
+The wallet source follows [BSIP-22, Author Wallet Proofs](https://github.com/bitsocialnet/BSIPs/blob/master/BSIPS/bsip-22.md). The wallet signs this exact string with EIP-191 (`personal_sign`), and `signature.type` is `eip191`:
+
+```
+{"domainSeparator":"bitsocial-author-wallet","authorPublicKey":"<key address>","walletAddress":"<wallet address>","timestamp":<timestamp>}
+```
+
+- `authorPublicKey` is the key address (`12D3KooW…`) of the author's **signing key**, which pkc-js exposes as `author.publicKey`. **Do not use `author.address`.** It is `author.name || publicKey`, so it follows a name when the name is repointed to another key.
+- `walletAddress` is the wallet entry's `address` in lowercase.
+- `timestamp` is the entry's `timestamp`, an unquoted integer. It may be at most 300 seconds ahead of the community node's clock.
+- The field order is fixed and there is no whitespace. Build the string by concatenation, not with a serializer whose key order you have not confirmed.
+
+Verification is stateless and needs no RPC: there is no "newest timestamp wins" and nothing is stored per wallet or per author. A signature with `v` other than 27 or 28, or with `s` in the upper half of the curve order, is rejected. A wallet entry with a `signature.type` other than `eip191` is unproven and does not satisfy this challenge. The `address` of an entry must be `0x` followed by 40 hex digits, not a name.
+
+Proofs signed with the old `plebbit-author-wallet` or `pkc-author-wallet` separators, over `author.address`, or without `walletAddress` are not accepted. Authors re-sign.
+
+One wallet can still back several author keys. Whether to limit that is a separate question for this challenge, not a part of wallet-proof validity.
 
 ## Requirements
 

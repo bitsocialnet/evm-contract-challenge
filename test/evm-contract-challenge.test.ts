@@ -10,6 +10,7 @@ import {
 import evmContractChallenge, {
   _clearViemClientCache
 } from "../src/evm-contract-challenge.js";
+import { buildWalletProofMessage } from "../src/wallet-proof.js";
 import type {
   ChallengeResultInput,
   GetChallengeArgsInput,
@@ -62,6 +63,12 @@ const EXACT_1000_BALANCE_DATA =
 const STRING_ABI_JSON =
   '{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"tierOf","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"}';
 const DEFAULT_AUTHOR_ADDRESS = "author-address";
+// The key address (12D3KooW...) of the author's signing key; pkc-js sets author.publicKey from the
+// verified signature. Taken from the BSIP-22 test vectors.
+const DEFAULT_AUTHOR_PUBLIC_KEY = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
+const OTHER_AUTHOR_PUBLIC_KEY = "12D3KooWRndVhVZPCiQwHBBBdg769GyrPUW13zxwqQyf9r3ANaba";
+const NFT_DISABLED_REASON =
+  "The NFT avatar source is disabled until a BSIP defines the avatar proof";
 const DEFAULT_RPC_URLS = "https://eth.example";
 
 const DEFAULT_OPTIONS = {
@@ -136,6 +143,7 @@ const createCommunity = (params: {
 
 const createPublication = (params: {
   authorAddress?: string;
+  authorPublicKey?: string;
   wallet?: AuthorWallet;
   avatar?: AuthorAvatar;
   // The wallet is looked up as author.wallets[chainTicker], so a test using a non-default chainTicker
@@ -147,6 +155,7 @@ const createPublication = (params: {
   return {
     author: {
       address: authorAddress,
+      publicKey: params.authorPublicKey ?? DEFAULT_AUTHOR_PUBLIC_KEY,
       ...(params.wallet
         ? { wallets: { [params.walletChainTicker ?? "eth"]: params.wallet } }
         : {}),
@@ -154,14 +163,6 @@ const createPublication = (params: {
     },
     signature: { type: "ed25519", signature: "", publicKey: "mock-public-key", signedPropertyNames: [] }
   } as unknown as PublicationWithCommunityAuthorFromDecryptedChallengeRequest;
-};
-
-const createWalletMessage = (authorAddress: string, timestamp: number): string => {
-  const message: Record<string, string | number> = {};
-  message.domainSeparator = "plebbit-author-wallet";
-  message.authorAddress = authorAddress;
-  message.timestamp = timestamp;
-  return JSON.stringify(message);
 };
 
 const createAvatarMessage = (params: {
@@ -180,11 +181,18 @@ const createAvatarMessage = (params: {
 };
 
 const signWalletProof = async (params: {
-  authorAddress: string;
+  // The key the proof is bound to; defaults to the default publication's signing key.
+  authorPublicKey?: string;
+  // Signs a different message than the one sent, so the signature does not verify.
   corrupted?: boolean;
-}): Promise<AuthorWallet> => {
-  const timestamp = Math.round(Date.now() / 1000);
-  const message = createWalletMessage(params.authorAddress, timestamp);
+  timestamp?: number;
+} = {}): Promise<AuthorWallet> => {
+  const timestamp = params.timestamp ?? Math.round(Date.now() / 1000);
+  const message = buildWalletProofMessage({
+    authorPublicKey: params.authorPublicKey ?? DEFAULT_AUTHOR_PUBLIC_KEY,
+    walletAddress: account.address,
+    timestamp
+  });
   const signedMessage = params.corrupted ? `${message}1` : message;
 
   const signature = await account.signMessage({ message: signedMessage });
@@ -247,7 +255,7 @@ const executeChallenge = async (params: {
 
 describe("evmContractChallenge", () => {
   it("passes when wallet balance is over threshold", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const mockClient = createClient({
       verifyMessage,
@@ -263,7 +271,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("fails when wallet balance is below threshold and no ENS/NFT fallback", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const mockClient = createClient({
       verifyMessage,
@@ -280,12 +288,13 @@ describe("evmContractChallenge", () => {
       "Author (author-address) has failed all EVM challenges, " +
         "walletFailureReason='PLEB token balance must be greater than 1000.', " +
         "ensAuthorAddressFailureReason='Author address is not a .bso/.eth domain', " +
-        "nftWalletAddressFailureReason='Author has no avatar NFT set'"
+        `nftWalletAddressFailureReason='${NFT_DISABLED_REASON}'`
     );
   });
 
-  it("passes when wallet fails but NFT owner wallet passes", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+  // Disabled until a BSIP defines the avatar proof.
+  it.skip("passes when wallet fails but NFT owner wallet passes", async () => {
+    const wallet = await signWalletProof();
     const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
 
     let callCount = 0;
@@ -308,8 +317,9 @@ describe("evmContractChallenge", () => {
     expect(result).toEqual({ success: true });
   });
 
-  it("fails when both wallet and NFT wallets are below threshold", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+  // Disabled until a BSIP defines the avatar proof.
+  it.skip("fails when both wallet and NFT wallets are below threshold", async () => {
+    const wallet = await signWalletProof();
     const avatar = await signAvatarProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
 
     const mockClient = createClient({
@@ -333,10 +343,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("fails with invalid wallet signature", async () => {
-    const wallet = await signWalletProof({
-      authorAddress: DEFAULT_AUTHOR_ADDRESS,
-      corrupted: true
-    });
+    const wallet = await signWalletProof({ corrupted: true });
 
     const mockClient = createClient({
       verifyMessage,
@@ -353,11 +360,12 @@ describe("evmContractChallenge", () => {
       "Author (author-address) has failed all EVM challenges, " +
         "walletFailureReason='The signature of the wallet is invalid', " +
         "ensAuthorAddressFailureReason='Author address is not a .bso/.eth domain', " +
-        "nftWalletAddressFailureReason='Author has no avatar NFT set'"
+        `nftWalletAddressFailureReason='${NFT_DISABLED_REASON}'`
     );
   });
 
-  it("fails with invalid NFT signature", async () => {
+  // Disabled until a BSIP defines the avatar proof.
+  it.skip("fails with invalid NFT signature", async () => {
     const avatar = await signAvatarProof({
       authorAddress: DEFAULT_AUTHOR_ADDRESS,
       corrupted: true
@@ -420,7 +428,7 @@ describe("evmContractChallenge", () => {
     });
 
     const publication = createPublication({
-      wallet: await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS })
+      wallet: await signWalletProof()
     });
 
     const missingCases: Array<{ key: string; expectedError: string }> = [
@@ -451,7 +459,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("throws for unsupported condition operator", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const mockClient = createClient({
       verifyMessage,
@@ -471,7 +479,7 @@ describe("evmContractChallenge", () => {
     // parseCondition used to keep the space, making isNumericConditionValue false and the comparison
     // a String() one, where "0" > " 1000". validateChallengeSettings trimmed before its numeric check,
     // so it accepted exactly the condition it exists to reject.
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const result = await executeChallenge({
       publication: createPublication({ wallet }),
@@ -486,7 +494,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("still passes a padded ordering condition when the balance is over it", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const result = await executeChallenge({
       publication: createPublication({ wallet }),
@@ -503,7 +511,7 @@ describe("evmContractChallenge", () => {
   it("compares a whitespace-padded equality condition against the trimmed value", async () => {
     // The ordering operators are not the only ones the untrimmed value broke: "= 1000" compared
     // String(1000n) against " 1000", so an exactly-matching balance failed its own condition.
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const result = await executeChallenge({
       publication: createPublication({ wallet }),
@@ -520,7 +528,7 @@ describe("evmContractChallenge", () => {
   it("keeps the operator character inside a condition value", async () => {
     // parseCondition used to split on the operator and take element [1], so "=a=b" asked for "a".
     // Slicing past the operator once is what validateConditionOption always did.
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const result = await executeChallenge({
       publication: createPublication({ wallet }),
@@ -540,7 +548,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("passes when rpcUrls is omitted, using the chain's built-in RPC", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const mockClient = createClient({
       verifyMessage,
@@ -570,59 +578,145 @@ describe("evmContractChallenge", () => {
     expect(file.type).toBe("chain/matic");
   });
 
-  it("rejects a domain wallet address whose name record resolves elsewhere", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
-    // author.wallets[chainTicker].address may be a domain rather than a 0x address, in which case its
-    // pkc-author-address record has to resolve to the publication signer.
+  it("rejects a name as the wallet address, without resolving it", async () => {
+    const wallet = await signWalletProof();
+    // BSIP-22: the address of a wallet entry is 0x followed by 40 hex digits, not a name.
     const domainWallet = { ...wallet, address: "wallet-owner.eth" } as typeof wallet;
     const resolveAuthorNameCalls: Array<{ name: string }> = [];
 
     const result = await executeChallenge({
       publication: createPublication({ wallet: domainWallet }),
-      mockClient: createClient({
-        verifyMessage: async () => true,
-        call: async () => ({ data: HIGH_BALANCE_DATA })
-      }),
+      mockClient: createClient({ call: async () => ({ data: HIGH_BALANCE_DATA }) }),
       community: createCommunity({
         resolveAuthorName: async (args) => {
           resolveAuthorNameCalls.push(args);
-          return { resolvedAuthorName: "someone-else" };
+          return { resolvedAuthorName: DEFAULT_AUTHOR_PUBLIC_KEY };
         }
       })
     });
 
-    // pkc-js 0.0.85 takes { name } and returns { resolvedAuthorName }, not an address and a bare string.
-    expect(resolveAuthorNameCalls).toEqual([{ name: "wallet-owner.eth" }]);
-
+    expect(resolveAuthorNameCalls).toEqual([]);
     expect(result.success).toBe(false);
     expect((result as { error?: string }).error).toContain(
-      "walletFailureReason='The author wallet address's pkc-author-address text record should resolve to the public key of the signature'"
+      "walletFailureReason='The wallet address must be 0x followed by 40 hex digits'"
     );
   });
 
-  it("rejects a domain wallet address that does not resolve at all", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
-    const domainWallet = { ...wallet, address: "wallet-owner.eth" } as typeof wallet;
+  describe("wallet proof (BSIP-22)", () => {
+    const highBalanceClient = () =>
+      createClient({ call: async () => ({ data: HIGH_BALANCE_DATA }) });
 
-    const result = await executeChallenge({
-      publication: createPublication({ wallet: domainWallet }),
-      mockClient: createClient({
-        verifyMessage: async () => true,
-        call: async () => ({ data: HIGH_BALANCE_DATA })
-      }),
-      community: createCommunity({
-        resolveAuthorName: async () => ({ resolvedAuthorName: null })
-      })
+    it("accepts a proof bound to the signing key when the author has a name", async () => {
+      const wallet = await signWalletProof();
+
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: "plebbit.bso", wallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result).toEqual({ success: true });
     });
 
-    expect(result.success).toBe(false);
-    expect((result as { error?: string }).error).toContain(
-      "walletFailureReason='The author wallet address's pkc-author-address text record should resolve to the public key of the signature'"
+    it("rejects a proof signed over the runtime author address", async () => {
+      // What the old code and the old clients signed: the name, not the key.
+      const wallet = await signWalletProof({ authorPublicKey: "plebbit.bso" });
+
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: "plebbit.bso", wallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result.success).toBe(false);
+      expect((result as { error?: string }).error).toContain(
+        "walletFailureReason='The signature of the wallet is invalid'"
+      );
+    });
+
+    it("rejects a proof bound to another key", async () => {
+      const wallet = await signWalletProof({ authorPublicKey: OTHER_AUTHOR_PUBLIC_KEY });
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it.each(["plebbit-author-wallet", "pkc-author-wallet"])(
+      "rejects a proof signed with the old %s separator",
+      async (separator) => {
+        const timestamp = Math.round(Date.now() / 1000);
+        const message = JSON.stringify({
+          domainSeparator: separator,
+          authorAddress: DEFAULT_AUTHOR_PUBLIC_KEY,
+          timestamp
+        });
+        const wallet = {
+          address: account.address,
+          timestamp,
+          signature: { signature: await account.signMessage({ message }), type: "eip191" }
+        } as AuthorWallet;
+
+        const result = await executeChallenge({
+          publication: createPublication({ wallet }),
+          mockClient: highBalanceClient()
+        });
+
+        expect(result.success).toBe(false);
+      }
     );
+
+    it("treats an unknown signature type as unproven, not as a pass", async () => {
+      const wallet = await signWalletProof();
+      const unknownWallet = {
+        ...wallet,
+        signature: { ...wallet.signature, type: "eip1271" }
+      } as AuthorWallet;
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet: unknownWallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result.success).toBe(false);
+      expect((result as { error?: string }).error).toContain(
+        "walletFailureReason='The wallet signature type 'eip1271' is not supported, so the wallet is unproven'"
+      );
+    });
+
+    it("rejects a timestamp more than 300 seconds ahead of the clock", async () => {
+      const wallet = await signWalletProof({
+        timestamp: Math.round(Date.now() / 1000) + 400
+      });
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it("is stateless: an older proof is accepted after a newer one", async () => {
+      const now = Math.round(Date.now() / 1000);
+      const newer = await signWalletProof({ timestamp: now });
+      const older = await signWalletProof({ timestamp: now - 3600 });
+      const community = createCommunity();
+
+      for (const wallet of [newer, older]) {
+        const result = await executeChallenge({
+          publication: createPublication({ wallet }),
+          mockClient: highBalanceClient(),
+          community
+        });
+        expect(result).toEqual({ success: true });
+      }
+    });
   });
 
   it("builds the contract-call client with the chain the chainTicker names", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     await executeChallenge({
       publication: createPublication({ wallet, walletChainTicker: "matic" }),
@@ -656,7 +750,8 @@ describe("evmContractChallenge", () => {
     expect(createPublicClientArgs.map((args) => args.chain?.id)).toContain(mainnet.id);
   });
 
-  it("falls through to the NFT check when the ENS lookup throws", async () => {
+  // Disabled until a BSIP defines the avatar proof.
+  it.skip("falls through to the NFT check when the ENS lookup throws", async () => {
     const avatar = await signAvatarProof({ authorAddress: "plebbit.eth" });
 
     const result = await executeChallenge({
@@ -711,7 +806,7 @@ describe("evmContractChallenge", () => {
   });
 
   it("throws a message naming rpcUrls when the chainTicker has no built-in RPC", async () => {
-    const wallet = await signWalletProof({ authorAddress: DEFAULT_AUTHOR_ADDRESS });
+    const wallet = await signWalletProof();
 
     const { rpcUrls: _unused, ...optionsWithoutRpcUrls } = DEFAULT_OPTIONS;
 
@@ -721,7 +816,7 @@ describe("evmContractChallenge", () => {
           wallet,
           walletChainTicker: "notachain"
         }),
-        mockClient: createClient({ verifyMessage }),
+        mockClient: createClient(),
         settings: {
           name: "@bitsocial/evm-contract-challenge",
           options: { ...optionsWithoutRpcUrls, chainTicker: "notachain" }
@@ -734,7 +829,8 @@ describe("evmContractChallenge", () => {
   // it drifted from the verifier: it signed a "pkc-author-avatar" separator and stored the signature
   // as a bare string, neither of which this challenge can read. These tests run the guide's own code
   // against the real verification path so the two cannot separate again silently.
-  describe("docs/nft.md", () => {
+  // Disabled until a BSIP defines the avatar proof.
+  describe.skip("docs/nft.md", () => {
     const docSource = readFileSync(
       new URL("../docs/nft.md", import.meta.url),
       "utf8"
@@ -856,9 +952,7 @@ describe("evmContractChallenge", () => {
     let publication: ReturnType<typeof createPublication>;
 
     beforeAll(async () => {
-      const wallet = await signWalletProof({
-        authorAddress: DEFAULT_AUTHOR_ADDRESS
-      });
+      const wallet = await signWalletProof();
       publication = createPublication({ wallet });
       mockClient = createClient({
         verifyMessage,

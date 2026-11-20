@@ -27,6 +27,7 @@ import {
   zksync
 } from "viem/chains";
 import { normalize } from "viem/ens";
+import { verifyWalletProof } from "./wallet-proof.js";
 import type {
   ChallengeFileInput,
   ChallengeInput,
@@ -241,10 +242,6 @@ const createEnsViemClient = (
   );
 };
 
-interface PKCWithOptionalAddressResolver extends PKC {
-  getPKCAddressFromPublicKey?: (publicKey: string) => Promise<string>;
-}
-
 interface SharedVerifyProps {
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest;
   chainTicker: string;
@@ -263,9 +260,6 @@ const publicationFieldNames = [
   "commentModeration",
   "communityEdit"
 ] as const;
-
-const isStringDomain = (value: string | undefined): value is string =>
-  typeof value === "string" && value.includes(".");
 
 const isEthAliasDomain = (address: string): boolean => {
   const lowerAddress = address.toLowerCase();
@@ -291,19 +285,6 @@ const derivePublicationFromChallengeRequest = (
   throw new Error("Failed to find publication on ChallengeRequest");
 };
 
-const getPublicationSignerAddress = async (
-  pkc: PKC,
-  publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest
-): Promise<string> => {
-  const maybeResolver = (pkc as PKCWithOptionalAddressResolver)
-    .getPKCAddressFromPublicKey;
-  if (typeof maybeResolver === "function") {
-    return maybeResolver(publication.signature.publicKey);
-  }
-
-  return publication.author.address;
-};
-
 const verifyAuthorWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
@@ -312,56 +293,19 @@ const verifyAuthorWalletAddress = async (
     return "The author wallet address is not defined";
   }
 
-  if (isStringDomain(authorWallet.address)) {
-    const { resolvedAuthorName } = await props.pkc.resolveAuthorName({
-      name: authorWallet.address
-    });
-    const publicationSignatureAddress = await getPublicationSignerAddress(
-      props.pkc,
-      props.publication
-    );
+  // Throws on owner misconfiguration (an unknown chainTicker without rpcUrls) so that it reaches the
+  // community owner as an error, instead of every author failing with a contract call reason. The
+  // client is cached per (chainTicker, rpcUrls), so the contract call below reuses it.
+  createViemClient(props.rpcUrls, props.chainTicker);
 
-    if (resolvedAuthorName !== publicationSignatureAddress) {
-      return "The author wallet address's pkc-author-address text record should resolve to the public key of the signature";
-    }
-  }
-
-  const viemClient = createViemClient(props.rpcUrls, props.chainTicker);
-
-  const messageToBeSigned: Record<string, string | number> = {};
-  messageToBeSigned.domainSeparator = "plebbit-author-wallet";
-  messageToBeSigned.authorAddress = props.publication.author.address;
-  messageToBeSigned.timestamp = authorWallet.timestamp;
-
-  const valid = await viemClient.verifyMessage({
-    address: authorWallet.address as HexAddress,
-    message: JSON.stringify(messageToBeSigned),
-    signature: authorWallet.signature.signature as HexAddress
+  // BSIP-22: the proof binds the wallet to the author's signing key, never to the runtime
+  // author.address, which is author.name || publicKey and follows a name when it is repointed.
+  const proof = await verifyWalletProof({
+    entry: authorWallet,
+    authorPublicKey: props.publication.author.publicKey
   });
-
-  if (!valid) {
-    return "The signature of the wallet is invalid";
-  }
-
-  const cache = await props.pkc._createStorageLRU({
-    cacheName: "challenge_evm_contract_call_v1_wallet_last_timestamp",
-    maxItems: Number.MAX_SAFE_INTEGER
-  });
-
-  const cacheKey = props.chainTicker + authorWallet.address;
-  const lastTimestampRaw = await cache.getItem(cacheKey);
-  const lastTimestampOfAuthor =
-    typeof lastTimestampRaw === "number" ? lastTimestampRaw : undefined;
-
-  if (
-    typeof lastTimestampOfAuthor === "number" &&
-    lastTimestampOfAuthor > authorWallet.timestamp
-  ) {
-    return "The author is trying to use an old wallet signature";
-  }
-
-  if ((lastTimestampOfAuthor ?? 0) < authorWallet.timestamp) {
-    await cache.setItem(cacheKey, authorWallet.timestamp);
+  if (proof.outcome !== "valid") {
+    return proof.reason;
   }
 
   const walletValidationFailure = await validateWalletAddressWithCondition({
@@ -422,7 +366,10 @@ const verifyAuthorENSAddress = async (
   return walletValidationFailure;
 };
 
-const verifyAuthorNftWalletAddress = async (
+const NFT_AVATAR_DISABLED_REASON =
+  "The NFT avatar source is disabled until a BSIP defines the avatar proof";
+
+export const _verifyAuthorNftWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
   if (!props.publication.author.avatar) {
@@ -839,12 +786,11 @@ const getChallenge = async ({
     return { success: true };
   }
 
-  const nftWalletAddressFailureReason = await verifyAuthorNftWalletAddress(
-    sharedProps
-  );
-  if (!nftWalletAddressFailureReason) {
-    return { success: true };
-  }
+  // The NFT avatar source is disabled until a BSIP defines the avatar proof (BSIP-22 covers wallets
+  // only). The legacy avatar message is signed over author.address with a plebbit- separator, which
+  // has the same problems BSIP-22 fixed for wallets. verifyAuthorNftWalletAddress is kept, unreachable,
+  // so that re-enabling it is a small change.
+  const nftWalletAddressFailureReason = NFT_AVATAR_DISABLED_REASON;
 
   const errorString =
     `Author (${publication.author.address}) has failed all EVM challenges, ` +
