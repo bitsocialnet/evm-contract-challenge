@@ -617,6 +617,25 @@ describe("evmContractChallenge", () => {
       expect(result).toEqual({ success: true });
     });
 
+    it("accepts a wallet address in a non-checksum mixed case", async () => {
+      const wallet = await signWalletProof();
+      // BSIP-22 compares addresses without regard to letter case, so this spelling is a valid entry.
+      // viem refuses to ABI-encode a mixed-case address whose checksum is wrong.
+      // Flipping the case of one letter of the checksummed address always breaks its checksum.
+      const address = account.address.replace(/(?<=^0x[0-9a-fA-F]*?)[a-fA-F]/, (c) =>
+        c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase()
+      );
+      expect(address).not.toBe(account.address);
+      const mixedCaseWallet = { ...wallet, address } as AuthorWallet;
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet: mixedCaseWallet }),
+        mockClient: highBalanceClient()
+      });
+
+      expect(result).toEqual({ success: true });
+    });
+
     it("rejects a proof signed over the runtime author address", async () => {
       // What the old code and the old clients signed: the name, not the key.
       const wallet = await signWalletProof({ authorPublicKey: "plebbit.bso" });

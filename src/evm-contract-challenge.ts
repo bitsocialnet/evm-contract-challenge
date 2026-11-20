@@ -309,7 +309,9 @@ const verifyAuthorWalletAddress = async (
   }
 
   const walletValidationFailure = await validateWalletAddressWithCondition({
-    authorWalletAddress: authorWallet.address,
+    // BSIP-22 accepts any letter case, but viem refuses to ABI-encode a mixed-case address whose
+    // checksum is wrong, so the contract call gets the lowercase form.
+    authorWalletAddress: authorWallet.address.toLowerCase(),
     condition: props.condition,
     contractAddress: props.contractAddress,
     chainTicker: props.chainTicker,
