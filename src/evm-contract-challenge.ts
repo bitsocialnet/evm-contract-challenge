@@ -3,6 +3,7 @@ import {
   decodeFunctionResult,
   encodeFunctionData,
   fallback,
+  getAddress,
   http,
   isAddress,
   type AbiFunction,
@@ -164,21 +165,20 @@ const parseRpcUrls = (rpcUrls: string | undefined): string[] =>
     .map((u) => u.trim())
     .filter(Boolean);
 
+// No `rank: true` on the fallback: ranking starts a loop that pings every endpoint every few seconds
+// and viem has no way to stop it. Cached clients are never evicted (a challenge file has no teardown
+// hook), so a ranked client kept polling its endpoints for the life of the node, including those of
+// an rpcUrls value the owner had since replaced. Unranked, endpoints are tried in the listed order
+// and a client sends nothing until it is used.
 const createTransport = (urls: string[]): Transport =>
   urls.length === 0
     ? http()
     : urls.length === 1
       ? http(urls[0])
-      : fallback(
-          urls.map((u) => http(u)),
-          { rank: true }
-        );
+      : fallback(urls.map((u) => http(u)));
 
-// Clients are cached per (chainTicker, rpcUrls) rather than built per call. fallback(..., {rank: true})
-// starts a background interval that pings every endpoint to reorder them and is never torn down, and a
-// single challenge attempt builds a client for the wallet check, the ENS check, the NFT check and each
-// contract call. Without this cache every publish would leak several permanent timers, each polling the
-// owner's RPC endpoints for the life of the node.
+// Clients are cached per (chainTicker, rpcUrls) rather than built per call: a single challenge attempt
+// builds a client for the wallet check, the ENS check, the NFT check and each contract call.
 const viemClientCache = new Map<string, PublicClient>();
 
 // Test seam: the cache is keyed by config, so nothing invalidates it within a process. Tests that swap
@@ -291,6 +291,17 @@ const derivePublicationFromChallengeRequest = (
   throw new Error("Failed to find publication on ChallengeRequest");
 };
 
+// Failure reasons are shown to the author. A viem error's message also carries transport details such
+// as the request URL, so a viem error contributes only its shortMessage. Checked by shape rather than
+// instanceof BaseError so an error from any copy of viem is covered.
+const describeError = (e: unknown): string => {
+  if (!(e instanceof Error)) {
+    return String(e);
+  }
+  const { shortMessage } = e as Error & { shortMessage?: unknown };
+  return typeof shortMessage === "string" ? shortMessage : e.message;
+};
+
 const getPublicationSignerAddress = async (
   pkc: PKC,
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest
@@ -304,6 +315,85 @@ const getPublicationSignerAddress = async (
   return publication.author.address;
 };
 
+interface LastWalletSignature {
+  timestamp: number;
+  signerPublicKey?: string;
+}
+
+// Versions before the signer was recorded stored a bare timestamp, read here as a record whose
+// signer is unknown.
+const parseLastWalletSignature = (
+  value: unknown
+): LastWalletSignature | undefined => {
+  if (typeof value === "number") {
+    return { timestamp: value };
+  }
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const { timestamp, signerPublicKey } = value as Record<string, unknown>;
+  if (typeof timestamp !== "number") {
+    return undefined;
+  }
+  return typeof signerPublicKey === "string"
+    ? { timestamp, signerPublicKey }
+    : { timestamp };
+};
+
+// Those versions also keyed the record by the chainTicker as configured plus the address as the author
+// sent it, lowercase or checksummed. One of those rows can sit at the new key itself, so until the
+// wallet has a record that names its signer, the newest of all of them decides. Otherwise an upgrade
+// would let a superseded author's old signature pass again.
+const readLastWalletSignature = async (
+  cache: Awaited<ReturnType<PKC["_createStorageLRU"]>>,
+  cacheKey: string,
+  chainTicker: string,
+  walletAddress: string
+): Promise<LastWalletSignature | undefined> => {
+  const current = parseLastWalletSignature(await cache.getItem(cacheKey));
+  if (current?.signerPublicKey !== undefined) {
+    return current;
+  }
+
+  const legacyKeys = new Set([
+    chainTicker + walletAddress.toLowerCase(),
+    chainTicker + getAddress(walletAddress)
+  ]);
+  legacyKeys.delete(cacheKey);
+
+  let newest = current;
+  for (const legacyKey of legacyKeys) {
+    const signature = parseLastWalletSignature(await cache.getItem(legacyKey));
+    if (signature && (!newest || signature.timestamp > newest.timestamp)) {
+      newest = signature;
+    }
+  }
+  return newest;
+};
+
+// pkc-js runs challenges concurrently, and checking a wallet's record and writing it back takes several
+// awaits. Two publications from different signers with the same wallet timestamp could both read the
+// record before either wrote theirs, and both pass. Checks of one wallet therefore run one at a time.
+const walletRecordQueues = new Map<string, Promise<unknown>>();
+
+const runWithWalletRecord = async <T>(
+  cacheKey: string,
+  task: () => Promise<T>
+): Promise<T> => {
+  const previous = walletRecordQueues.get(cacheKey) ?? Promise.resolve();
+  const current = previous.then(task);
+  const settled = current.catch(() => undefined);
+  walletRecordQueues.set(cacheKey, settled);
+  try {
+    return await current;
+  } finally {
+    if (walletRecordQueues.get(cacheKey) === settled) {
+      walletRecordQueues.delete(cacheKey);
+    }
+  }
+};
+
 const verifyAuthorWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
@@ -312,10 +402,18 @@ const verifyAuthorWalletAddress = async (
     return "The author wallet address is not defined";
   }
 
+  // Like the ENS lookup and the NFT read, the steps below run on author-supplied input and can throw.
+  // The wallet is one of three sources of a wallet address, so a throw here is returned as this
+  // source's reason and getChallenge goes on to the ENS and NFT checks.
   if (isStringDomain(authorWallet.address)) {
-    const { resolvedAuthorName } = await props.pkc.resolveAuthorName({
-      name: authorWallet.address
-    });
+    let resolvedAuthorName: string | null | undefined;
+    try {
+      ({ resolvedAuthorName } = await props.pkc.resolveAuthorName({
+        name: authorWallet.address
+      }));
+    } catch (e) {
+      return `Failed to resolve the author wallet address: ${describeError(e)}`;
+    }
     const publicationSignatureAddress = await getPublicationSignerAddress(
       props.pkc,
       props.publication
@@ -326,6 +424,13 @@ const verifyAuthorWalletAddress = async (
     }
   }
 
+  // A domain whose record matches still cannot be checked against a signature: verifyMessage throws
+  // InvalidAddressError for anything but a 0x address. Strict, like the encoder the contract call
+  // uses, so a wrongly checksummed address fails here rather than at that call.
+  if (!isAddress(authorWallet.address)) {
+    return "The author wallet address is not a valid EVM address";
+  }
+
   const viemClient = createViemClient(props.rpcUrls, props.chainTicker);
 
   const messageToBeSigned: Record<string, string | number> = {};
@@ -333,11 +438,16 @@ const verifyAuthorWalletAddress = async (
   messageToBeSigned.authorAddress = props.publication.author.address;
   messageToBeSigned.timestamp = authorWallet.timestamp;
 
-  const valid = await viemClient.verifyMessage({
-    address: authorWallet.address as HexAddress,
-    message: JSON.stringify(messageToBeSigned),
-    signature: authorWallet.signature.signature as HexAddress
-  });
+  let valid: boolean;
+  try {
+    valid = await viemClient.verifyMessage({
+      address: authorWallet.address,
+      message: JSON.stringify(messageToBeSigned),
+      signature: authorWallet.signature.signature as HexAddress
+    });
+  } catch (e) {
+    return `Failed to verify the wallet signature: ${describeError(e)}`;
+  }
 
   if (!valid) {
     return "The signature of the wallet is invalid";
@@ -348,20 +458,48 @@ const verifyAuthorWalletAddress = async (
     maxItems: Number.MAX_SAFE_INTEGER
   });
 
-  const cacheKey = props.chainTicker + authorWallet.address;
-  const lastTimestampRaw = await cache.getItem(cacheKey);
-  const lastTimestampOfAuthor =
-    typeof lastTimestampRaw === "number" ? lastTimestampRaw : undefined;
+  // One record per wallet: the newest signature timestamp seen and the key that signed the publication
+  // it came with. A wallet signed over to a new author with a newer timestamp stops working for the
+  // previous one, so the record has to say who holds that timestamp, or a second author signed with the
+  // same timestamp passes too. The author is identified by the signer key pkc-js has already verified,
+  // not by author.address: that is the author's name when they have one, so it changes when they set or
+  // clear the name, and clients re-sign the wallet with the timestamp they stored for it. The address
+  // is lowercased so another spelling of the same wallet shares the record.
+  const cacheKey =
+    normalizeChainTicker(props.chainTicker) + authorWallet.address.toLowerCase();
+  const signerPublicKey = props.publication.signature.publicKey;
 
-  if (
-    typeof lastTimestampOfAuthor === "number" &&
-    lastTimestampOfAuthor > authorWallet.timestamp
-  ) {
-    return "The author is trying to use an old wallet signature";
-  }
+  const replayFailure = await runWithWalletRecord(cacheKey, async () => {
+    const lastSignature = await readLastWalletSignature(
+      cache,
+      cacheKey,
+      props.chainTicker,
+      authorWallet.address
+    );
 
-  if ((lastTimestampOfAuthor ?? 0) < authorWallet.timestamp) {
-    await cache.setItem(cacheKey, authorWallet.timestamp);
+    if (lastSignature && lastSignature.timestamp > authorWallet.timestamp) {
+      return "The author is trying to use an old wallet signature";
+    }
+
+    const sameTimestamp = lastSignature?.timestamp === authorWallet.timestamp;
+    if (
+      sameTimestamp &&
+      lastSignature.signerPublicKey !== undefined &&
+      lastSignature.signerPublicKey !== signerPublicKey
+    ) {
+      return "Another author already uses this wallet with a signature of the same timestamp";
+    }
+
+    if (!sameTimestamp || lastSignature.signerPublicKey !== signerPublicKey) {
+      await cache.setItem(cacheKey, {
+        timestamp: authorWallet.timestamp,
+        signerPublicKey
+      });
+    }
+    return undefined;
+  });
+  if (replayFailure) {
+    return replayFailure;
   }
 
   const walletValidationFailure = await validateWalletAddressWithCondition({
@@ -402,7 +540,7 @@ const verifyAuthorENSAddress = async (
       name: normalize(ensAddress)
     });
   } catch (e) {
-    return `Failed to resolve ENS address of author.address: ${e instanceof Error ? e.message : String(e)}`;
+    return `Failed to resolve ENS address of author.address: ${describeError(e)}`;
   }
 
   if (!ownerOfAddress) {
@@ -456,11 +594,16 @@ const verifyAuthorNftWalletAddress = async (
   messageToBeSigned.tokenAddress = nftAvatar.address;
   messageToBeSigned.tokenId = String(nftAvatar.id);
 
-  const valid = await viemClient.verifyMessage({
-    address: currentOwner,
-    message: JSON.stringify(messageToBeSigned),
-    signature: nftAvatar.signature.signature as HexAddress
-  });
+  let valid: boolean;
+  try {
+    valid = await viemClient.verifyMessage({
+      address: currentOwner,
+      message: JSON.stringify(messageToBeSigned),
+      signature: nftAvatar.signature.signature as HexAddress
+    });
+  } catch (e) {
+    return `Failed to verify the nft avatar signature: ${describeError(e)}`;
+  }
 
   if (!valid) {
     return "The signature of the nft avatar is invalid";

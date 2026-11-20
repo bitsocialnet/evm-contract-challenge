@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 import { mainnet, polygon } from "viem/chains";
 import {
   _clearViemClientCache,
@@ -91,8 +91,6 @@ describe("createViemClient", () => {
     expect(client.transport.url).toBe(MAINNET_RPC);
   });
 
-  // fallback(..., {rank: true}) starts an endpoint-ranking interval that is never torn down, so a
-  // client built per call would leak one timer per verification step of every publish.
   it("reuses one client per (chainTicker, rpcUrls) instead of building one per call", () => {
     expect(createViemClient(MAINNET_RPC, "eth")).toBe(
       createViemClient(MAINNET_RPC, "eth")
@@ -101,8 +99,7 @@ describe("createViemClient", () => {
 
   it("keys the cache on the normalized ticker, not the raw one", () => {
     // The chain is looked up with trim().toLowerCase(); when the cache key was not, "ETH", " eth "
-    // and "eth" each built their own client for the same chain, and each extra client with several
-    // rpcUrls adds another ranking interval this cache exists to avoid.
+    // and "eth" each built their own client for the same chain.
     const client = createViemClient(MAINNET_RPC, "eth");
 
     expect(createViemClient(MAINNET_RPC, "ETH")).toBe(client);
@@ -127,6 +124,29 @@ describe("createViemClient", () => {
     expect(createViemClient(MAINNET_RPC, "eth")).not.toBe(
       createViemClient("https://other.example", "eth")
     );
+  });
+});
+
+describe("multiple rpcUrls", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // Cached clients live as long as the process and nothing can stop a fallback ranker. With
+  // fallback(..., {rank: true}) every client built for 2+ rpcUrls pinged each endpoint forever,
+  // including the endpoints of an rpcUrls value the owner had since replaced.
+  it("sends no requests from a client nothing is using", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const rpcUrls = `${MAINNET_RPC},https://eth2.example`;
+    createViemClient(rpcUrls, "eth");
+    createEnsViemClient(rpcUrls, "eth");
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
