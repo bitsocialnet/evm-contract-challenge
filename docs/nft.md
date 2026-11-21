@@ -1,3 +1,5 @@
+> **Disabled.** The NFT avatar source of `@bitsocial/evm-contract-challenge` is switched off. The message below is signed over the runtime `author.address` with a legacy `plebbit-` separator, which has the same problems BSIP-22 fixed for wallet proofs, and no BSIP defines the avatar proof yet. Do not build clients against it. This guide stays as a reference until the avatar proof is specified ([BSIP discussion](https://github.com/bitsocialnet/BSIPs/issues/40), [tracking issue](https://github.com/bitsocialnet/evm-contract-challenge/issues/11)).
+
 ### How to resolve and verify NFT avatars
 
 ```js
