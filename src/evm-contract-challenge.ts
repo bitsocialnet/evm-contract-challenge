@@ -285,6 +285,31 @@ const derivePublicationFromChallengeRequest = (
   throw new Error("Failed to find publication on ChallengeRequest");
 };
 
+// BSIP-22, community acceptance: a publication whose author.wallets contains an invalid entry, for any
+// chain, is rejected outright. It must not fall through to the ENS source, and the community cannot
+// drop the entry and accept the rest, because author is covered by the author's signature. An unknown
+// entry is not a ground for rejection.
+const findInvalidWalletEntry = async (
+  publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest
+): Promise<string | undefined> => {
+  const wallets = publication.author.wallets;
+  if (!wallets) {
+    return undefined;
+  }
+
+  for (const [chainTicker, entry] of Object.entries(wallets)) {
+    const proof = await verifyWalletProof({
+      entry,
+      authorPublicKey: publication.author.publicKey
+    });
+    if (proof.outcome === "invalid") {
+      return `The author wallet entry for chain '${chainTicker}' is invalid: ${proof.reason}`;
+    }
+  }
+
+  return undefined;
+};
+
 const verifyAuthorWalletAddress = async (
   props: SharedVerifyProps
 ): Promise<string | undefined> => {
@@ -777,6 +802,11 @@ const getChallenge = async ({
     contractAddress: address,
     rpcUrls
   };
+
+  const invalidWalletEntryReason = await findInvalidWalletEntry(publication);
+  if (invalidWalletEntryReason) {
+    return { success: false, error: invalidWalletEntryReason };
+  }
 
   const walletFailureReason = await verifyAuthorWalletAddress(sharedProps);
   if (!walletFailureReason) {

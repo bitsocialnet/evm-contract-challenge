@@ -357,10 +357,7 @@ describe("evmContractChallenge", () => {
 
     expect(result.success).toBe(false);
     expect((result as { error?: string }).error).toBe(
-      "Author (author-address) has failed all EVM challenges, " +
-        "walletFailureReason='The signature of the wallet is invalid', " +
-        "ensAuthorAddressFailureReason='Author address is not a .bso/.eth domain', " +
-        `nftWalletAddressFailureReason='${NFT_DISABLED_REASON}'`
+      "The author wallet entry for chain 'eth' is invalid: The signature of the wallet is invalid"
     );
   });
 
@@ -598,7 +595,7 @@ describe("evmContractChallenge", () => {
     expect(resolveAuthorNameCalls).toEqual([]);
     expect(result.success).toBe(false);
     expect((result as { error?: string }).error).toContain(
-      "walletFailureReason='The wallet address must be 0x followed by 40 hex digits'"
+      "The author wallet entry for chain 'eth' is invalid: The wallet address must be 0x followed by 40 hex digits"
     );
   });
 
@@ -647,7 +644,7 @@ describe("evmContractChallenge", () => {
 
       expect(result.success).toBe(false);
       expect((result as { error?: string }).error).toContain(
-        "walletFailureReason='The signature of the wallet is invalid'"
+        "The author wallet entry for chain 'eth' is invalid: The signature of the wallet is invalid"
       );
     });
 
@@ -715,6 +712,63 @@ describe("evmContractChallenge", () => {
       });
 
       expect(result.success).toBe(false);
+    });
+
+    it("rejects the publication when the wallet entry is invalid, even if the ENS owner passes", async () => {
+      const wallet = await signWalletProof({ corrupted: true });
+
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: "plebbit.eth", wallet }),
+        mockClient: createClient({
+          getEnsAddress: async () => account.address,
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        })
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error:
+          "The author wallet entry for chain 'eth' is invalid: The signature of the wallet is invalid"
+      });
+    });
+
+    it("rejects the publication when an entry for another chain is invalid, naming that chain", async () => {
+      const validEthWallet = await signWalletProof();
+      const invalidPolygonWallet = await signWalletProof({ corrupted: true });
+      const publication = createPublication({ wallet: validEthWallet });
+      publication.author.wallets = {
+        eth: validEthWallet,
+        matic: invalidPolygonWallet
+      };
+
+      const result = await executeChallenge({
+        publication,
+        mockClient: highBalanceClient()
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error:
+          "The author wallet entry for chain 'matic' is invalid: The signature of the wallet is invalid"
+      });
+    });
+
+    it("lets an unknown entry fall through to the ENS source", async () => {
+      const wallet = await signWalletProof();
+      const unknownWallet = {
+        ...wallet,
+        signature: { ...wallet.signature, type: "eip1271" }
+      } as AuthorWallet;
+
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: "plebbit.eth", wallet: unknownWallet }),
+        mockClient: createClient({
+          getEnsAddress: async () => account.address,
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        })
+      });
+
+      expect(result).toEqual({ success: true });
     });
 
     it("is stateless: an older proof is accepted after a newer one", async () => {

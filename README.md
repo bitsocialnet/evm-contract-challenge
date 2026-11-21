@@ -25,7 +25,9 @@ The wallet source follows [BSIP-22, Author Wallet Proofs](https://github.com/bit
 - `timestamp` is the entry's `timestamp`, an unquoted integer. It may be at most 300 seconds ahead of the community node's clock.
 - The field order is fixed and there is no whitespace. Build the string by concatenation, not with a serializer whose key order you have not confirmed.
 
-Verification is stateless and needs no RPC: there is no "newest timestamp wins" and nothing is stored per wallet or per author. A signature with `v` other than 27 or 28, or with `s` in the upper half of the curve order, is rejected. A wallet entry with a `signature.type` other than `eip191` is unproven and does not satisfy this challenge. The `address` of an entry must be `0x` followed by 40 hex digits, not a name.
+Verification is stateless and needs no RPC: there is no "newest timestamp wins" and nothing is stored per wallet or per author. A signature with `v` other than 27 or 28, or with `s` in the upper half of the curve order, is rejected. A wallet entry with a `signature.type` other than `eip191` is unproven and does not satisfy this challenge, but it does not reject the publication: the ENS source can still pass.
+
+A publication whose `author.wallets` contains an **invalid** entry, for any chain, is rejected outright, as BSIP-22 requires of a community. It does not fall through to the ENS source, and the reason names the chain ticker of the failing entry. A proof counts only when the signature of the publication that carries it is valid too, which pkc-js checks before the challenge runs. The `address` of an entry must be `0x` followed by 40 hex digits, not a name.
 
 Proofs signed with the old `plebbit-author-wallet` or `pkc-author-wallet` separators, over `author.address`, or without `walletAddress` are not accepted. Authors re-sign.
 
