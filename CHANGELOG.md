@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.1.7...v0.2.0) (2026-11-22)
+
+### ⚠ BREAKING CHANGES
+
+* proofs signed with plebbit-author-wallet, pkc-author-wallet,
+  over author.address, or without walletAddress are no longer accepted. Authors
+  re-sign. The NFT avatar source no longer grants a pass.
+
+### Bug Fixes
+
+* lowercase the verified wallet address before the contract call ([05ec9ab](https://github.com/bitsocialnet/evm-contract-challenge/commit/05ec9abde78ab416326a24c1c152fb0a1a29d9f6))
+* reject a publication with an invalid wallet entry instead of falling through ([6d65212](https://github.com/bitsocialnet/evm-contract-challenge/commit/6d65212bf3bb1d0ee6fcc92989fd7d4c53196927))
+* verify wallet proofs per BSIP-22, bound to the author's signing key ([6df76ea](https://github.com/bitsocialnet/evm-contract-challenge/commit/6df76ea44e9c3425c6e5627fd3e88c6ed9dd272b))
+
 ## [0.1.7](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.1.6...v0.1.7) (2026-09-03)
 
 ### Bug Fixes
