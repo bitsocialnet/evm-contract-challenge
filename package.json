@@ -45,7 +45,7 @@
   "devDependencies": {
     "@commitlint/cli": "21.2.2",
     "@commitlint/config-conventional": "21.2.2",
-    "@pkcprotocol/pkc-js": "0.0.85",
+    "@pkcprotocol/pkc-js": "0.0.163",
     "@release-it/conventional-changelog": "12.0.0",
     "@types/node": "25.3.5",
     "commitizen": "4.3.2",
@@ -57,7 +57,6 @@
   },
   "overrides": {
     "@pkcprotocol/pkc-js": {
-      "@libp2p/gossipsub": "16.0.5",
       "probe-image-size": "7.4.0"
     },
     "@protobufjs/utf8@1.1.0": "1.1.1",
