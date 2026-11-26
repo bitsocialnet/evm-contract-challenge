@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.2.0...v0.2.1) (2026-11-26)
+
+### Bug Fixes
+
+* **deps:** upgrade @pkcprotocol/pkc-js 0.0.85 -> 0.0.163 ([#13](https://github.com/bitsocialnet/evm-contract-challenge/issues/13)) ([2e39c60](https://github.com/bitsocialnet/evm-contract-challenge/commit/2e39c60590e1af3534c926c7af7dc36b43063fad))
+
 ## [0.2.0](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.1.7...v0.2.0) (2026-11-22)
 
 ### ⚠ BREAKING CHANGES
