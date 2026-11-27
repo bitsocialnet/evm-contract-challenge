@@ -967,6 +967,84 @@ describe("evmContractChallenge", () => {
       // The ENS reason is returned to the author too, so it is masked there as well.
       expect((result as { error?: string }).error).not.toContain("SECRET-KEY");
     });
+
+    it("masks a keyed RPC URL that another configured URL is a prefix of", async () => {
+      const wallet = await signWalletProof();
+      const logStub = createLogStub();
+      const keyedRpcUrl = "https://rpc.example/v2/SECRET-KEY";
+
+      await executeChallenge({
+        publication: createPublication({ wallet }),
+        // The short URL comes first, so masking in configured order would leave "/v2/SECRET-KEY".
+        settings: createChallengeSettings({ rpcUrls: `https://rpc.example,${keyedRpcUrl}` }),
+        mockClient: createClient({
+          verifyMessage,
+          call: async () => {
+            throw new Error(`HTTP request failed at ${keyedRpcUrl}.`);
+          }
+        }),
+        log: logStub.log
+      });
+
+      expect(logStub.stub.error).toHaveBeenCalledWith(
+        expect.stringContaining("failed: HTTP request failed at <rpcUrl>.")
+      );
+      expect(logStub.lines().join("\n")).not.toContain("SECRET-KEY");
+    });
+
+    it("logs nothing when the wallet's contract call fails but the ENS owner passes", async () => {
+      const wallet = await signWalletProof();
+      const logStub = createLogStub();
+      let callCount = 0;
+
+      const result = await executeChallenge({
+        publication: createPublication({ wallet, authorAddress: "plebbit.eth" }),
+        mockClient: createClient({
+          verifyMessage,
+          getEnsAddress: async () => account.address,
+          // The first call is the proven wallet's, the second the ENS owner's.
+          call: async () => {
+            callCount += 1;
+            if (callCount === 1) {
+              throw new Error("HTTP request failed.");
+            }
+            return { data: HIGH_BALANCE_DATA };
+          }
+        }),
+        log: logStub.log
+      });
+
+      expect(result).toEqual({ success: true });
+      expect(callCount).toBe(2);
+      expect(logStub.lines()).toEqual([]);
+    });
+
+    it("keeps an author-chosen signature type to one bounded line", async () => {
+      const wallet = await signWalletProof();
+      const logStub = createLogStub();
+      const injectedType = `eip1271\nforged log line ${"x".repeat(500)}`;
+
+      const result = await executeChallenge({
+        publication: createPublication({
+          wallet: {
+            ...wallet,
+            signature: { ...wallet.signature, type: injectedType }
+          } as AuthorWallet
+        }),
+        mockClient: createClient({ verifyMessage, call: async () => ({ data: HIGH_BALANCE_DATA }) }),
+        log: logStub.log
+      });
+
+      const error = (result as { error?: string }).error ?? "";
+      expect(error).toContain("The wallet signature type 'eip1271?forged?log?line?xxx");
+      expect(error).not.toContain("\n");
+      expect(error).not.toContain("x".repeat(65));
+      expect(logStub.lines().length).toBeGreaterThan(0);
+      for (const line of logStub.lines()) {
+        expect(line).not.toContain("\n");
+        expect(line).not.toContain("x".repeat(65));
+      }
+    });
   });
 
   it("throws a message naming rpcUrls when the chainTicker has no built-in RPC", async () => {

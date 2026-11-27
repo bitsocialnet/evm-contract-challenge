@@ -81,6 +81,19 @@ describe("validateChallengeSettings", () => {
       expect(logStub.lines().join("\n")).not.toContain("SECRET-KEY");
       expect(logStub.stub.error).toHaveBeenCalledWith(expect.stringContaining("<rpcUrl>"));
     });
+
+    it("masks a keyed RPC URL that another configured URL is a prefix of", () => {
+      const logStub = createLogStub();
+      // The short URL comes first and is valid; the keyed one is rejected and named in the message.
+      const rpcUrls = "https://rpc.example,https://rpc.example:bad/SECRET-KEY";
+      expect(() =>
+        validateChallengeSettings({
+          challengeSettings: buildSettings({ rpcUrls }),
+          log: logStub.log
+        })
+      ).toThrow(/not a valid URL/);
+      expect(logStub.lines().join("\n")).not.toContain("SECRET-KEY");
+    });
   });
 
   it("is exposed on the challenge file so pkc-js can call it", () => {

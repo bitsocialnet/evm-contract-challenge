@@ -27,7 +27,7 @@ import {
   zksync
 } from "viem/chains";
 import { normalize } from "viem/ens";
-import { verifyWalletProof } from "./wallet-proof.js";
+import { toPrintableToken, verifyWalletProof } from "./wallet-proof.js";
 import type {
   ChallengeFileInput,
   ChallengeLog,
@@ -251,14 +251,30 @@ const createEnsViemClient = (
 const toLogSafeMessage = (value: unknown, rpcUrls: string | undefined): string => {
   const message = value instanceof Error ? value.message : String(value);
   let firstLine = message.split("\n")[0] ?? "";
-  for (const url of parseRpcUrls(rpcUrls)) {
+  // Longest first: when one URL is a prefix of another (https://rpc.example and
+  // https://rpc.example/v2/<KEY>), masking the short one first would leave the key behind.
+  const urlsLongestFirst = parseRpcUrls(rpcUrls).sort((a, b) => b.length - a.length);
+  for (const url of urlsLongestFirst) {
     firstLine = firstLine.split(url).join("<rpcUrl>");
   }
   return firstLine;
 };
 
+// A source can fail while a later one passes, and a publication that passes logs nothing, so the
+// verifiers collect their lines here and getChallenge writes them only when it rejects.
+interface Diagnostic {
+  level: "error" | "trace";
+  line: string;
+}
+
+const writeDiagnostics = (log: ChallengeLog, diagnostics: readonly Diagnostic[]): void => {
+  for (const { level, line } of diagnostics) {
+    log[level](line);
+  }
+};
+
 interface SharedVerifyProps {
-  log: ChallengeLog;
+  diagnostics: Diagnostic[];
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest;
   chainTicker: string;
   condition: string;
@@ -307,22 +323,25 @@ const derivePublicationFromChallengeRequest = (
 // entry is not a ground for rejection.
 const findInvalidWalletEntry = async (
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest,
-  log: ChallengeLog
+  diagnostics: Diagnostic[]
 ): Promise<string | undefined> => {
   const wallets = publication.author.wallets;
   if (!wallets) {
     return undefined;
   }
 
-  for (const [chainTicker, entry] of Object.entries(wallets)) {
+  for (const [authorChainTicker, entry] of Object.entries(wallets)) {
+    // The key comes from the author, and the reason reaches both the author and the log.
+    const chainTicker = toPrintableToken(authorChainTicker);
     const proof = await verifyWalletProof({
       entry,
       authorPublicKey: publication.author.publicKey
     });
     if (proof.outcome === "invalid") {
-      log.trace(
-        `Wallet entry for chain '${chainTicker}' of author ${publication.author.address} is invalid: ${proof.reason}`
-      );
+      diagnostics.push({
+        level: "trace",
+        line: `Wallet entry for chain '${chainTicker}' of author ${publication.author.address} is invalid: ${proof.reason}`
+      });
       return `The author wallet entry for chain '${chainTicker}' is invalid: ${proof.reason}`;
     }
   }
@@ -350,9 +369,10 @@ const verifyAuthorWalletAddress = async (
     authorPublicKey: props.publication.author.publicKey
   });
   if (proof.outcome !== "valid") {
-    props.log.trace(
-      `Wallet proof for chain '${props.chainTicker}' of author ${props.publication.author.address} is ${proof.outcome}: ${proof.reason}`
-    );
+    props.diagnostics.push({
+      level: "trace",
+      line: `Wallet proof for chain '${props.chainTicker}' of author ${props.publication.author.address} is ${proof.outcome}: ${proof.reason}`
+    });
     return proof.reason;
   }
 
@@ -366,7 +386,7 @@ const verifyAuthorWalletAddress = async (
     abi: props.abi,
     error: props.error,
     rpcUrls: props.rpcUrls,
-    log: props.log
+    diagnostics: props.diagnostics
   });
 
   return walletValidationFailure;
@@ -399,7 +419,10 @@ const verifyAuthorENSAddress = async (
   } catch (e) {
     // Trimmed for the author as well as the log: viem's full message repeats the RPC URL.
     const safeMessage = toLogSafeMessage(e, props.rpcUrls);
-    props.log.error(`ENS resolution of author address ${authorAddress} failed: ${safeMessage}`);
+    props.diagnostics.push({
+      level: "error",
+      line: `ENS resolution of author address ${authorAddress} failed: ${safeMessage}`
+    });
     return `Failed to resolve ENS address of author.address: ${safeMessage}`;
   }
 
@@ -415,7 +438,7 @@ const verifyAuthorENSAddress = async (
     abi: props.abi,
     error: props.error,
     rpcUrls: props.rpcUrls,
-    log: props.log
+    diagnostics: props.diagnostics
   });
 
   return walletValidationFailure;
@@ -476,7 +499,7 @@ export const _verifyAuthorNftWalletAddress = async (
     abi: props.abi,
     error: props.error,
     rpcUrls: props.rpcUrls,
-    log: props.log
+    diagnostics: props.diagnostics
   });
 
   return nftWalletValidationFailure;
@@ -623,7 +646,7 @@ const validateWalletAddressWithCondition = async (props: {
   abi: Record<string, unknown>;
   error: string | undefined;
   rpcUrls: string | undefined;
-  log: ChallengeLog;
+  diagnostics: Diagnostic[];
 }): Promise<string | undefined> => {
   let contractCallResponse: unknown;
   try {
@@ -637,10 +660,12 @@ const validateWalletAddressWithCondition = async (props: {
   } catch (e) {
     // The author only sees a generic reason, so this line is the owner's only way to learn the cause
     // (an RPC outage, a wrong contract address, an ABI that does not match the contract).
-    props.log.error(
-      `Contract call to ${props.contractAddress} on chain '${props.chainTicker}' for wallet ${props.authorWalletAddress} failed: ` +
+    props.diagnostics.push({
+      level: "error",
+      line:
+        `Contract call to ${props.contractAddress} on chain '${props.chainTicker}' for wallet ${props.authorWalletAddress} failed: ` +
         toLogSafeMessage(e, props.rpcUrls)
-    );
+    });
     return "Failed getting contract call response from blockchain.";
   }
 
@@ -842,8 +867,9 @@ const getChallenge = async ({
   const parsedAbi = parseChallengeAbi(abi);
   const publication = derivePublicationFromChallengeRequest(challengeRequestMessage);
 
+  const diagnostics: Diagnostic[] = [];
   const sharedProps: SharedVerifyProps = {
-    log,
+    diagnostics,
     pkc: community._pkc,
     abi: parsedAbi,
     condition,
@@ -854,8 +880,9 @@ const getChallenge = async ({
     rpcUrls
   };
 
-  const invalidWalletEntryReason = await findInvalidWalletEntry(publication, log);
+  const invalidWalletEntryReason = await findInvalidWalletEntry(publication, diagnostics);
   if (invalidWalletEntryReason) {
+    writeDiagnostics(log, diagnostics);
     return { success: false, error: invalidWalletEntryReason };
   }
 
@@ -882,6 +909,7 @@ const getChallenge = async ({
     `ensAuthorAddressFailureReason='${ensAuthorAddressFailureReason}', ` +
     `nftWalletAddressFailureReason='${nftWalletAddressFailureReason}'`;
 
+  writeDiagnostics(log, diagnostics);
   log.trace(errorString);
   return { success: false, error: errorString };
 };
