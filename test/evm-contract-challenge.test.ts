@@ -1019,6 +1019,31 @@ describe("evmContractChallenge", () => {
       expect(logStub.lines()).toEqual([]);
     });
 
+    it("keeps an author name that ENS cannot normalize to one bounded line", async () => {
+      const logStub = createLogStub();
+      // Passes pkc-js's own name checks when resolveAuthorNames is off: it has a "." and no capitals.
+      const craftedName = `x\nforged line ${"y".repeat(500)}.eth`;
+
+      const result = await executeChallenge({
+        publication: createPublication({ authorAddress: craftedName }),
+        mockClient: createClient({
+          verifyMessage,
+          getEnsAddress: async () => account.address,
+          call: async () => ({ data: HIGH_BALANCE_DATA })
+        }),
+        log: logStub.log
+      });
+
+      expect(result.success).toBe(false);
+      expect(logStub.stub.error).toHaveBeenCalledWith(
+        expect.stringContaining("ENS resolution of author address x?forged?line?")
+      );
+      for (const line of logStub.lines()) {
+        expect(line).not.toContain("\n");
+        expect(line).not.toContain("y".repeat(301));
+      }
+    });
+
     it("keeps an author-chosen signature type to one bounded line", async () => {
       const wallet = await signWalletProof();
       const logStub = createLogStub();

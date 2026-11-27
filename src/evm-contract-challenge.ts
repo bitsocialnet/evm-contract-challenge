@@ -248,6 +248,8 @@ const createEnsViemClient = (
 // keeps private, and rpcUrls above all: RPC URLs routinely embed a provider API key. viem error messages
 // repeat the request URL on later lines ("URL: https://..."), so only the first line is kept, and any
 // configured RPC URL left in it is masked.
+const LOG_SAFE_MESSAGE_MAX_LENGTH = 300;
+
 const toLogSafeMessage = (value: unknown, rpcUrls: string | undefined): string => {
   const message = value instanceof Error ? value.message : String(value);
   let firstLine = message.split("\n")[0] ?? "";
@@ -257,7 +259,10 @@ const toLogSafeMessage = (value: unknown, rpcUrls: string | undefined): string =
   for (const url of urlsLongestFirst) {
     firstLine = firstLine.split(url).join("<rpcUrl>");
   }
-  return firstLine;
+  // Bounded because the message can quote author input, such as a crafted name viem fails to normalize.
+  return firstLine.length > LOG_SAFE_MESSAGE_MAX_LENGTH
+    ? `${firstLine.slice(0, LOG_SAFE_MESSAGE_MAX_LENGTH)}...`
+    : firstLine;
 };
 
 // A source can fail while a later one passes, and a publication that passes logs nothing, so the
@@ -340,7 +345,7 @@ const findInvalidWalletEntry = async (
     if (proof.outcome === "invalid") {
       diagnostics.push({
         level: "trace",
-        line: `Wallet entry for chain '${chainTicker}' of author ${publication.author.address} is invalid: ${proof.reason}`
+        line: `Wallet entry for chain '${chainTicker}' of author ${toPrintableToken(publication.author.address)} is invalid: ${proof.reason}`
       });
       return `The author wallet entry for chain '${chainTicker}' is invalid: ${proof.reason}`;
     }
@@ -371,7 +376,7 @@ const verifyAuthorWalletAddress = async (
   if (proof.outcome !== "valid") {
     props.diagnostics.push({
       level: "trace",
-      line: `Wallet proof for chain '${props.chainTicker}' of author ${props.publication.author.address} is ${proof.outcome}: ${proof.reason}`
+      line: `Wallet proof for chain '${props.chainTicker}' of author ${toPrintableToken(props.publication.author.address)} is ${proof.outcome}: ${proof.reason}`
     });
     return proof.reason;
   }
@@ -421,7 +426,7 @@ const verifyAuthorENSAddress = async (
     const safeMessage = toLogSafeMessage(e, props.rpcUrls);
     props.diagnostics.push({
       level: "error",
-      line: `ENS resolution of author address ${authorAddress} failed: ${safeMessage}`
+      line: `ENS resolution of author address ${toPrintableToken(authorAddress)} failed: ${safeMessage}`
     });
     return `Failed to resolve ENS address of author.address: ${safeMessage}`;
   }
@@ -904,7 +909,7 @@ const getChallenge = async ({
   const nftWalletAddressFailureReason = NFT_AVATAR_DISABLED_REASON;
 
   const errorString =
-    `Author (${publication.author.address}) has failed all EVM challenges, ` +
+    `Author (${toPrintableToken(publication.author.address)}) has failed all EVM challenges, ` +
     `walletFailureReason='${walletFailureReason}', ` +
     `ensAuthorAddressFailureReason='${ensAuthorAddressFailureReason}', ` +
     `nftWalletAddressFailureReason='${nftWalletAddressFailureReason}'`;
