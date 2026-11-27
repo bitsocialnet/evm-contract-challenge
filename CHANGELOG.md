@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.2.1...v0.3.0) (2026-11-27)
+
+### ⚠ BREAKING CHANGES
+
+* requires @pkcprotocol/pkc-js >=0.0.165, now a peer
+  dependency. An older pkc-js passes no log, so getChallenge and
+  validateChallengeSettings would throw.
+
+### Features
+
+* log challenge failures through the log pkc-js passes ([6be3049](https://github.com/bitsocialnet/evm-contract-challenge/commit/6be3049d96434e0f0af511543bb2d63c8f5d25a6)), closes [#14](https://github.com/bitsocialnet/evm-contract-challenge/issues/14), references [#626](https://github.com/bitsocialnet/evm-contract-challenge/issues/626)
+
+### Bug Fixes
+
+* close the review findings on challenge logging ([8760eae](https://github.com/bitsocialnet/evm-contract-challenge/commit/8760eae7f367244e8799d01fbbbdedc1278e4789))
+* keep the author address to one bounded line in log lines ([66cf1f8](https://github.com/bitsocialnet/evm-contract-challenge/commit/66cf1f8c1e1ccc6737fc77d869bbbae2b3e6e341))
+
 ## [0.2.1](https://github.com/bitsocialnet/evm-contract-challenge/compare/v0.2.0...v0.2.1) (2026-11-26)
 
 ### Bug Fixes
