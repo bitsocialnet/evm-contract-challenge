@@ -30,6 +30,7 @@ import { normalize } from "viem/ens";
 import { verifyWalletProof } from "./wallet-proof.js";
 import type {
   ChallengeFileInput,
+  ChallengeLog,
   ChallengeInput,
   ChallengeResultInput,
   GetChallengeArgsInput,
@@ -242,7 +243,22 @@ const createEnsViemClient = (
   );
 };
 
+// Everything written to log lands in the node's log buffer, which pkc.getLogs and the getLogs RPC method hand
+// to every client of the node's RPC server. So a line carries no publication content and no option the owner
+// keeps private, and rpcUrls above all: RPC URLs routinely embed a provider API key. viem error messages
+// repeat the request URL on later lines ("URL: https://..."), so only the first line is kept, and any
+// configured RPC URL left in it is masked.
+const toLogSafeMessage = (value: unknown, rpcUrls: string | undefined): string => {
+  const message = value instanceof Error ? value.message : String(value);
+  let firstLine = message.split("\n")[0] ?? "";
+  for (const url of parseRpcUrls(rpcUrls)) {
+    firstLine = firstLine.split(url).join("<rpcUrl>");
+  }
+  return firstLine;
+};
+
 interface SharedVerifyProps {
+  log: ChallengeLog;
   publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest;
   chainTicker: string;
   condition: string;
@@ -290,7 +306,8 @@ const derivePublicationFromChallengeRequest = (
 // drop the entry and accept the rest, because author is covered by the author's signature. An unknown
 // entry is not a ground for rejection.
 const findInvalidWalletEntry = async (
-  publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest
+  publication: PublicationWithCommunityAuthorFromDecryptedChallengeRequest,
+  log: ChallengeLog
 ): Promise<string | undefined> => {
   const wallets = publication.author.wallets;
   if (!wallets) {
@@ -303,6 +320,9 @@ const findInvalidWalletEntry = async (
       authorPublicKey: publication.author.publicKey
     });
     if (proof.outcome === "invalid") {
+      log.trace(
+        `Wallet entry for chain '${chainTicker}' of author ${publication.author.address} is invalid: ${proof.reason}`
+      );
       return `The author wallet entry for chain '${chainTicker}' is invalid: ${proof.reason}`;
     }
   }
@@ -330,6 +350,9 @@ const verifyAuthorWalletAddress = async (
     authorPublicKey: props.publication.author.publicKey
   });
   if (proof.outcome !== "valid") {
+    props.log.trace(
+      `Wallet proof for chain '${props.chainTicker}' of author ${props.publication.author.address} is ${proof.outcome}: ${proof.reason}`
+    );
     return proof.reason;
   }
 
@@ -342,7 +365,8 @@ const verifyAuthorWalletAddress = async (
     chainTicker: props.chainTicker,
     abi: props.abi,
     error: props.error,
-    rpcUrls: props.rpcUrls
+    rpcUrls: props.rpcUrls,
+    log: props.log
   });
 
   return walletValidationFailure;
@@ -373,7 +397,10 @@ const verifyAuthorENSAddress = async (
       name: normalize(ensAddress)
     });
   } catch (e) {
-    return `Failed to resolve ENS address of author.address: ${e instanceof Error ? e.message : String(e)}`;
+    // Trimmed for the author as well as the log: viem's full message repeats the RPC URL.
+    const safeMessage = toLogSafeMessage(e, props.rpcUrls);
+    props.log.error(`ENS resolution of author address ${authorAddress} failed: ${safeMessage}`);
+    return `Failed to resolve ENS address of author.address: ${safeMessage}`;
   }
 
   if (!ownerOfAddress) {
@@ -387,7 +414,8 @@ const verifyAuthorENSAddress = async (
     chainTicker: props.chainTicker,
     abi: props.abi,
     error: props.error,
-    rpcUrls: props.rpcUrls
+    rpcUrls: props.rpcUrls,
+    log: props.log
   });
 
   return walletValidationFailure;
@@ -447,7 +475,8 @@ export const _verifyAuthorNftWalletAddress = async (
     chainTicker: props.chainTicker,
     abi: props.abi,
     error: props.error,
-    rpcUrls: props.rpcUrls
+    rpcUrls: props.rpcUrls,
+    log: props.log
   });
 
   return nftWalletValidationFailure;
@@ -594,6 +623,7 @@ const validateWalletAddressWithCondition = async (props: {
   abi: Record<string, unknown>;
   error: string | undefined;
   rpcUrls: string | undefined;
+  log: ChallengeLog;
 }): Promise<string | undefined> => {
   let contractCallResponse: unknown;
   try {
@@ -604,7 +634,13 @@ const validateWalletAddressWithCondition = async (props: {
       authorWalletAddress: props.authorWalletAddress,
       rpcUrls: props.rpcUrls
     });
-  } catch {
+  } catch (e) {
+    // The author only sees a generic reason, so this line is the owner's only way to learn the cause
+    // (an RPC outage, a wrong contract address, an ABI that does not match the contract).
+    props.log.error(
+      `Contract call to ${props.contractAddress} on chain '${props.chainTicker}' for wallet ${props.authorWalletAddress} failed: ` +
+        toLogSafeMessage(e, props.rpcUrls)
+    );
     return "Failed getting contract call response from blockchain.";
   }
 
@@ -696,11 +732,7 @@ const parseChallengeAbi = (abi: string): Record<string, unknown> => {
 //
 // Every rejection below currently surfaces as a per-author challenge failure at publish time, which is
 // the wrong audience: the author cannot fix the community's ABI.
-const validateChallengeSettings = ({
-  challengeSettings
-}: {
-  challengeSettings: CommunityChallengeSetting;
-}): void => {
+const assertValidChallengeSettings = (challengeSettings: CommunityChallengeSetting): void => {
   const options = challengeSettings.options ?? {};
   const { chainTicker, address, abi, condition, rpcUrls } = options;
 
@@ -762,10 +794,28 @@ const validateChallengeSettings = ({
   }
 };
 
+const validateChallengeSettings = ({
+  challengeSettings,
+  log
+}: {
+  challengeSettings: CommunityChallengeSetting;
+  log: ChallengeLog;
+}): void => {
+  try {
+    assertValidChallengeSettings(challengeSettings);
+  } catch (e) {
+    log.error(
+      `Rejected the challenge settings: ${toLogSafeMessage(e, challengeSettings.options?.rpcUrls)}`
+    );
+    throw e;
+  }
+};
+
 const getChallenge = async ({
   challengeSettings,
   challengeRequestMessage,
-  community
+  community,
+  log
 }: GetChallengeArgsInput): Promise<ChallengeResultInput> => {
   let { chainTicker, address, abi, condition, error, rpcUrls } =
     challengeSettings?.options || {};
@@ -793,6 +843,7 @@ const getChallenge = async ({
   const publication = derivePublicationFromChallengeRequest(challengeRequestMessage);
 
   const sharedProps: SharedVerifyProps = {
+    log,
     pkc: community._pkc,
     abi: parsedAbi,
     condition,
@@ -803,7 +854,7 @@ const getChallenge = async ({
     rpcUrls
   };
 
-  const invalidWalletEntryReason = await findInvalidWalletEntry(publication);
+  const invalidWalletEntryReason = await findInvalidWalletEntry(publication, log);
   if (invalidWalletEntryReason) {
     return { success: false, error: invalidWalletEntryReason };
   }
@@ -831,13 +882,16 @@ const getChallenge = async ({
     `ensAuthorAddressFailureReason='${ensAuthorAddressFailureReason}', ` +
     `nftWalletAddressFailureReason='${nftWalletAddressFailureReason}'`;
 
+  log.trace(errorString);
   return { success: false, error: errorString };
 };
 
+// log is part of the factory args since pkc-js 0.0.165. The factory itself has nothing to log.
 function evmContractChallenge({
   challengeSettings
 }: {
   challengeSettings: CommunityChallengeSetting;
+  log: ChallengeLog;
 }): ChallengeFileInput {
   const chainTicker = challengeSettings?.options?.chainTicker;
   const type = `chain/${chainTicker || "eth"}` as ChallengeInput["type"];

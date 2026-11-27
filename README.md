@@ -37,6 +37,7 @@ One wallet can still back several author keys. Whether to limit that is a separa
 
 - Node.js `>=22`
 - ESM-only environment
+- `@pkcprotocol/pkc-js` `>=0.0.165` (a peer dependency: the challenge logs through the `log` it passes)
 
 ## Install
 
@@ -234,6 +235,15 @@ Rejected settings:
 - `condition` with no supported operator (`=`, `>`, `<`), no value after the operator, or an ordering comparison against a non-numeric value (e.g. `>abc`, which would otherwise compare as text)
 
 pkc-js additionally rejects an option name that no option above declares, and any required option left unset, before this challenge's own validation runs.
+
+## Logging
+
+The challenge writes only to the `log` pkc-js passes it, which pkc-js tags with the community's `publicKey`, the publication's `signature` and the `challengeIndex`. Lines are returned by `pkc.getLogs` and the `getLogs` RPC method, so an owner can look up why a publication was rejected.
+
+- `log.error`: a failed contract call, a failed ENS lookup, and rejected challenge settings.
+- `log.trace`: an invalid or unproven wallet proof, and the final rejection with every source's reason. Shown only when `DEBUG` enables trace.
+
+A publication that passes logs nothing. Every client of the node's RPC server can read these lines, so they carry addresses and reasons only: no publication content, no option values other than the contract address, the chain and, in a settings rejection, the rejected value, and never `rpcUrls`. Errors are cut to their first line and any configured RPC URL left in them is masked as `<rpcUrl>`.
 
 ## Multiple RPC URLs
 
