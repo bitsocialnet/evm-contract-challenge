@@ -34,6 +34,17 @@ export const buildWalletProofMessage = (params: {
   `"walletAddress":"${params.walletAddress.toLowerCase()}",` +
   `"timestamp":${params.timestamp}}`;
 
+// For a value the author picks (a wallet's chain ticker key, its signature type) that is echoed back in a
+// reason. Reasons go to the author and to the node's log buffer, which every RPC client can read, so the
+// value is kept to one bounded line of plain characters: no newlines to forge log lines, no unbounded payload.
+const PRINTABLE_TOKEN_MAX_LENGTH = 64;
+export const toPrintableToken = (value: string): string => {
+  const printable = value.replace(/[^\w.:+-]/g, "?");
+  return printable.length > PRINTABLE_TOKEN_MAX_LENGTH
+    ? `${printable.slice(0, PRINTABLE_TOKEN_MAX_LENGTH)}...`
+    : printable;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -67,7 +78,7 @@ export const verifyWalletProof = async (params: {
   if (type !== "eip191") {
     return {
       outcome: "unknown",
-      reason: `The wallet signature type '${type}' is not supported, so the wallet is unproven`
+      reason: `The wallet signature type '${toPrintableToken(type)}' is not supported, so the wallet is unproven`
     };
   }
 

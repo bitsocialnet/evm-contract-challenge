@@ -3,6 +3,7 @@ import evmContractChallenge, {
   validateChallengeSettings
 } from "../src/evm-contract-challenge.js";
 import type { CommunityChallengeSetting } from "../src/types.js";
+import { createLogStub } from "./log-stub.js";
 
 const CONTRACT_ADDRESS = "0xEA81DaB2e0EcBc6B5c4172DE4c22B6Ef6E55Bd8f";
 const BALANCE_ABI_JSON =
@@ -43,13 +44,62 @@ const validate = (
   publicOptions?: string[]
 ): void =>
   validateChallengeSettings({
-    challengeSettings: buildSettings(overrides, publicOptions)
+    challengeSettings: buildSettings(overrides, publicOptions),
+    log: createLogStub().log
   });
 
 describe("validateChallengeSettings", () => {
+  describe("logging", () => {
+    it("logs nothing for valid settings", () => {
+      const logStub = createLogStub();
+      validateChallengeSettings({ challengeSettings: buildSettings(), log: logStub.log });
+      expect(logStub.lines()).toEqual([]);
+    });
+
+    it("logs a rejection at error level with the message it throws", () => {
+      const logStub = createLogStub();
+      expect(() =>
+        validateChallengeSettings({
+          challengeSettings: buildSettings({ condition: "~1000" }),
+          log: logStub.log
+        })
+      ).toThrow(/option condition must start with/);
+      expect(logStub.stub.error).toHaveBeenCalledWith(
+        expect.stringMatching(/^Rejected the challenge settings: option condition must start with/)
+      );
+    });
+
+    it("masks the rpcUrls entry that a rejection names", () => {
+      const logStub = createLogStub();
+      const secretRpcUrl = "ftp://rpc.example/v2/SECRET-KEY";
+      expect(() =>
+        validateChallengeSettings({
+          challengeSettings: buildSettings({ rpcUrls: secretRpcUrl }),
+          log: logStub.log
+        })
+      ).toThrow(/must use http: or https:/);
+      expect(logStub.lines().join("\n")).not.toContain("SECRET-KEY");
+      expect(logStub.stub.error).toHaveBeenCalledWith(expect.stringContaining("<rpcUrl>"));
+    });
+
+    it("masks a keyed RPC URL that another configured URL is a prefix of", () => {
+      const logStub = createLogStub();
+      // The short URL comes first and is valid; the keyed one is rejected and named in the message.
+      const rpcUrls = "https://rpc.example,https://rpc.example:bad/SECRET-KEY";
+      expect(() =>
+        validateChallengeSettings({
+          challengeSettings: buildSettings({ rpcUrls }),
+          log: logStub.log
+        })
+      ).toThrow(/not a valid URL/);
+      expect(logStub.lines().join("\n")).not.toContain("SECRET-KEY");
+    });
+  });
+
   it("is exposed on the challenge file so pkc-js can call it", () => {
     const challengeFile = evmContractChallenge({
-      challengeSettings: buildSettings()
+      challengeSettings: buildSettings(),
+      log: createLogStub().log
     });
 
     expect(typeof challengeFile.validateChallengeSettings).toBe("function");
@@ -64,7 +114,8 @@ describe("validateChallengeSettings", () => {
     // that and must not crash on the empty case.
     expect(() =>
       validateChallengeSettings({
-        challengeSettings: { name: "@bitsocial/evm-contract-challenge" }
+        challengeSettings: { name: "@bitsocial/evm-contract-challenge" },
+        log: createLogStub().log
       })
     ).not.toThrow();
   });
